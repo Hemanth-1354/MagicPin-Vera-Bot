@@ -127,19 +127,24 @@ def detect_auto_reply(message: str) -> bool:
 
 def detect_explicit_intent(message: str) -> Optional[str]:
     msg_lower = message.lower()
-    if any(p in msg_lower for p in [
-        "let's do it", "lets do it", "ok do it", "go ahead", "yes let's",
-        "haan karo", "confirm", "proceed", "start karo", "shuru karo",
-        "yes please", "bilkul", "whats next", "what's next", "send it",
-        "draft it", "do it"
-    ]):
-        return "commit"
-    if any(p in msg_lower for p in [
-        "not interested", "stop messaging", "stop", "band karo", "mat karo",
-        "unsubscribe", "do not contact", "mujhe nahi chahiye", "nahi chahiye",
-        "mat bhejo"
-    ]):
-        return "opt_out"
+    word_count = len(message.split())
+    
+    if word_count <= 6 and not any(w in msg_lower for w in ["but", "if", "instead", "except", "change"]):
+        if any(p in msg_lower for p in [
+            "let's do it", "lets do it", "ok do it", "go ahead", "yes let's",
+            "haan karo", "confirm", "proceed", "start karo", "shuru karo",
+            "yes please", "bilkul", "whats next", "what's next", "send it",
+            "draft it", "do it"
+        ]):
+            return "commit"
+            
+    if word_count <= 8 and not any(w in msg_lower for w in ["but", "instead", "except"]):
+        if any(p in msg_lower for p in [
+            "not interested", "stop messaging", "stop", "band karo", "mat karo",
+            "unsubscribe", "do not contact", "mujhe nahi chahiye", "nahi chahiye",
+            "mat bhejo"
+        ]):
+            return "opt_out"
     if any(p in msg_lower for p in [
         "gst", "income tax", "loan", "insurance", "property", "legal advice",
         "gst filing", "gst return"
@@ -532,7 +537,7 @@ _gemini_key_429_at: dict[int, float] = {}
 
 # ── Groq ──────────────────────────────────────
 GROQ_API_KEYS: list[str] = []
-for _k in ["GROQ_API_KEY", "GROQ_API_KEY_2", "GROQ_API_KEY_3", "GROQ_API_KEY_4"]:
+for _k in ["GROQ_API_KEY_1", "GROQ_API_KEY_2", "GROQ_API_KEY_3", "GROQ_API_KEY_4"]:
     _v = os.getenv(_k, "").strip()
     if _v:
         GROQ_API_KEYS.append(_v)
@@ -938,6 +943,8 @@ State      : {customer.get('state')} | last_visit={rel.get('last_visit')} | visi
 Services   : {rel.get('services_received', [])}
 Slots pref : {prefs.get('preferred_slots')}
 Consent    : {customer.get('consent', {}).get('scope', [])}
+
+CRITICAL: You MUST use the customer's name in your opening hook!
 """
 
     # ── RECENT CONVERSATION ──────────────────────────────────────────────────
@@ -1231,14 +1238,19 @@ def select_and_compose_actions(available_triggers: list[str], now: str) -> list[
                 m_cat = m_p.get("category_slug") or m_p.get("identity", {}).get("category_slug")
                 if m_cat == category_slug:
                     try:
-                        res = compose_message(category, m_p, trg, None)
+                        res = compose_message(category, m_p, trg, None, m_p.get("conversation_history", []))
                         if res.get("body"):
                             conv_id = f"conv_{m_id}_{tid}_{hashlib.md5(now.encode()).hexdigest()[:6]}"
                             actions.append({
+                                "conversation_id": conv_id,
                                 "merchant_id":     m_id,
                                 "trigger_id":      tid,
+                                "send_as":         res.get("send_as", "vera"),
+                                "template_name":   TEMPLATE_MAP.get(trg.get("kind"), "vera_outreach_v2"),
+                                "template_params": {"body_text": res.get("body", "")},
                                 "body":            res["body"],
                                 "cta":             res["cta"],
+                                "rationale":       res.get("rationale", "Composed from category trigger"),
                                 "suppression_key": f"research:{category_slug}:{now[:10]}",
                             })
                             conversations[conv_id] = {"merchant_id": m_id, "trigger_id": tid, "turn": 1}
@@ -1257,7 +1269,7 @@ def select_and_compose_actions(available_triggers: list[str], now: str) -> list[
         customer = get_customer(customer_id) if customer_id else None
 
         try:
-            result = compose_message(category, merchant, trg, customer)
+            result = compose_message(category, merchant, trg, customer, merchant.get("conversation_history", []))
         except Exception as e:
             print(f"[Compose error] {tid}: {e}")
             continue
@@ -1275,10 +1287,15 @@ def select_and_compose_actions(available_triggers: list[str], now: str) -> list[
         template_name = TEMPLATE_MAP.get(kind, "vera_generic_v2")
 
         action = {
+            "conversation_id": conv_id,
             "merchant_id":     merchant_id,
             "trigger_id":      tid,
+            "send_as":         result.get("send_as", "vera"),
+            "template_name":   template_name,
+            "template_params": template_params,
             "body":            result["body"],
             "cta":             result["cta"],
+            "rationale":       result.get("rationale", "Composed from merchant trigger"),
             "suppression_key": suppression_key,
         }
         actions.append(action)

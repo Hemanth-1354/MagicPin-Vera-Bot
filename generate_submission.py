@@ -122,7 +122,7 @@ def main():
         time.sleep(6)  # Rate limit buffer (increased to avoid 429s)
 
     # Write output
-    with open(args.out, "w") as f:
+    with open(args.out, "w", encoding="utf-8") as f:
         for r in results:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 

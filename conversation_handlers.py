@@ -288,7 +288,7 @@ def respond(
     Multi-turn reply handler for replay/tiebreaker round.
     Given current state + merchant message, returns Vera's next move.
     """
-    from bot import call_llm  # avoid circular at module level
+    from bot import call_llm_reply  # avoid circular at module level
 
     state.add_turn("merchant", merchant_message)
     intent = classify_message(merchant_message)
@@ -386,7 +386,7 @@ def respond(
         trigger   or {},
         customer,
     )
-    raw    = call_llm(prompt)
+    raw    = call_llm_reply(prompt)
 
     result = {}
     try:
