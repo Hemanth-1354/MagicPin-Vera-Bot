@@ -596,7 +596,7 @@ def call_sambanova(prompt: str, model: str) -> str:
                 "max_tokens":  512,
             },
             {
-                "Content-Type":  "application/json",
+                "Content-Type":  "application/json; charset=utf-8",
                 "Authorization": f"Bearer {SAMBANOVA_API_KEY}",
             }
         )
@@ -645,7 +645,7 @@ def call_groq(prompt: str, model: str) -> str:
                     "max_tokens":  512,
                 },
                 {
-                    "Content-Type":  "application/json",
+                    "Content-Type":  "application/json; charset=utf-8",
                     "Authorization": f"Bearer {key}",
                 }
             )
@@ -720,14 +720,17 @@ def call_gemini(prompt: str) -> str:
 # DISPATCH FUNCTIONS
 # ─────────────────────────────────────────────
 
-_HEURISTIC_FALLBACK = json.dumps({
-    "body":      "Quick update on your account — want me to share one thing I spotted? Reply YES.",
-    "cta":       "binary_yes_no",
-    "rationale": "Heuristic fallback — LLM unavailable"
-})
+def get_heuristic_fallback(merchant_name: str = "", category_slug: str = "") -> str:
+    m_part = f" for your {merchant_name} account" if merchant_name else ""
+    c_part = f" regarding {category_slug} trends" if category_slug else " regarding your growth"
+    return json.dumps({
+        "body":      f"Quick update{m_part} — I spotted a metric{c_part}. Reply YES to share the one thing I spotted.",
+        "cta":       "binary_yes_no",
+        "rationale": "Heuristic fallback — LLM unavailable, using contextual placeholder."
+    })
 
 
-def call_llm_compose(prompt: str) -> str:
+def call_llm_compose(prompt: str, m_name: str = "", cat: str = "") -> str:
     """/v1/tick — Groq Primary -> Groq Fallback -> heuristic"""
     if GROQ_API_KEYS and not _groq_disabled:
         try:
@@ -739,10 +742,10 @@ def call_llm_compose(prompt: str) -> str:
                 return call_groq(prompt, GROQ_MODEL_REPLY)
             except Exception as e2:
                 print(f"[Groq Fallback Failed] {e2}")
-    return _HEURISTIC_FALLBACK
+    return get_heuristic_fallback(m_name, cat)
 
 
-def call_llm_reply(prompt: str) -> str:
+def call_llm_reply(prompt: str, m_name: str = "", cat: str = "") -> str:
     """/v1/reply — Groq Primary -> Groq Fallback -> heuristic"""
     if GROQ_API_KEYS and not _groq_disabled:
         try:
@@ -756,8 +759,8 @@ def call_llm_reply(prompt: str) -> str:
                 print(f"[Groq Reply Fallback Failed] {e2}")
     return json.dumps({
         "action": "send",
-        "body":   "Thanks for your message — let me look into that.",
-        "rationale": "Heuristic fallback — Groq unavailable"
+        "body":   f"Thanks for your message{' ' + m_name if m_name else ''} — let me look into those {cat + ' ' if cat else ''}details for you.",
+        "rationale": f"Heuristic fallback for {m_name or 'merchant'} — maintaining engagement while LLM recovers."
     })
 
 
@@ -944,7 +947,9 @@ def compose_message(
     """Core composer — returns {body, cta, rationale, send_as, suppression_key}."""
     lead_signal = pick_lead_signal(trigger, merchant, category)
     prompt      = build_compose_prompt(category, merchant, trigger, customer, conv_history, lead_signal)
-    raw         = call_llm_compose(prompt)
+    m_name = merchant.get("identity", {}).get("name", "")
+    category_slug = category.get("slug", "")
+    raw         = call_llm_compose(prompt, m_name, category_slug)
     result      = parse_llm_json(raw)
 
     body     = result.get("body", "").strip()
@@ -1087,9 +1092,9 @@ def compose_reply(
     merchant     = get_merchant(merchant_id) or {}
     customer     = get_customer(customer_id) if customer_id else None
     trigger      = get_trigger(trigger_id)   if trigger_id  else {}
-    category_slug = merchant.get("category_slug", "")
+    category_slug = merchant.get("category_slug") or merchant.get("identity", {}).get("category_slug", "")
     category      = get_category(category_slug) if category_slug else {}
-
+    
     m_name   = merchant.get("identity", {}).get("name", "")
     owner    = merchant.get("identity", {}).get("owner_first_name", "")
     offers   = [o["title"] for o in merchant.get("offers", []) if o.get("status") == "active"]
@@ -1108,9 +1113,10 @@ def compose_reply(
     prompt = f"""{REPLY_SYSTEM}
 
 MERCHANT : {m_name} | owner={owner}
-CATEGORY : {category_slug}
+CATEGORY : {category_slug} | tone={category.get('voice', {}).get('tone')} | taboo={category.get('voice', {}).get('vocab_taboo', [])}
 OFFERS   : {offers}
 CUST AGG : total={cust_agg.get('total_unique_ytd')} lapsed={cust_agg.get('lapsed_180d_plus') or cust_agg.get('lapsed_90d_plus')}
+PEER BENCH: {category.get('peer_stats', {})}
 TRIGGER  : {(trigger or {}).get('kind', '')}
 
 CONVERSATION:
@@ -1121,7 +1127,7 @@ Intent: {intent or 'normal_reply'}
 
 Reply now as Vera. JSON only:"""
 
-    raw    = call_llm_reply(prompt)
+    raw    = call_llm_reply(prompt, m_name, category_slug)
     result = parse_llm_json(raw)
 
     action = result.get("action", "send")
@@ -1224,18 +1230,21 @@ async def select_and_compose_actions(available_triggers: list[str], now: str) ->
                         res = compose_message(category, m_p, trg, None, m_p.get("conversation_history", []))
                         if res.get("body"):
                             conv_id = f"conv_{m_id}_{tid}_{hashlib.md5(now.encode()).hexdigest()[:6]}"
+                            s_key   = f"research:{category_slug}:{now[:10]}"
                             actions.append({
                                 "conversation_id": conv_id,
                                 "merchant_id":     m_id,
+                                "customer_id":     None,
                                 "trigger_id":      tid,
                                 "send_as":         res.get("send_as", "vera"),
                                 "template_name":   TEMPLATE_MAP.get(trg.get("kind"), "vera_outreach_v2"),
-                                "template_params": {"body_text": res.get("body", "")},
+                                "template_params": [res.get("body", "")],
                                 "body":            res["body"],
                                 "cta":             res["cta"],
                                 "rationale":       res.get("rationale", "Composed from category trigger"),
-                                "suppression_key": f"research:{category_slug}:{now[:10]}",
+                                "suppression_key": s_key,
                             })
+                            fired_suppressions.add(s_key)
                             conversations[conv_id] = {"merchant_id": m_id, "trigger_id": tid, "turn": 1}
                     except Exception as e:
                         print(f'[Category trigger error] {e}')
@@ -1258,14 +1267,15 @@ async def select_and_compose_actions(available_triggers: list[str], now: str) ->
             if not result.get("body"): return
 
             conv_id = f"conv_{merchant_id}_{tid}_{hashlib.md5(now.encode()).hexdigest()[:6]}"
-            body_parts = result["body"].split(". ")[:3]
-            template_params = (body_parts + ["..."] * 3)[:3]
+            body_parts = result["body"].split(". ")[:2]
+            template_params = body_parts + ["Check it out!"]
             kind          = trg.get("kind", "generic")
             template_name = TEMPLATE_MAP.get(kind, "vera_generic_v2")
 
             action = {
                 "conversation_id": conv_id,
                 "merchant_id":     merchant_id,
+                "customer_id":     customer_id,
                 "trigger_id":      tid,
                 "send_as":         result.get("send_as", "vera"),
                 "template_name":   template_name,
@@ -1335,9 +1345,11 @@ async def metadata():
     return {
         "team_name":    TEAM_NAME,
         "team_members": TEAM_MEMBERS.split(","),
+        "contact_email": CONTACT_EMAIL,
         "model":        model_primary,
         "approach":     "single-prompt composer with retrieval",
         "version":      BOT_VERSION,
+        "submitted_at": now_iso(),
     }
 
 
@@ -1464,11 +1476,14 @@ async def teardown():
     fired_suppressions.clear()
     seen_auto_reply_msgs.clear()
     global _gemini_key_index, _gemini_key_429_at,\
-           _sambanova_disabled, _sambanova_429_at
+           _sambanova_disabled, _sambanova_429_at,\
+           _groq_disabled, _groq_key_429_at
     _gemini_key_index    = 0
     _gemini_key_429_at   = {}
     _sambanova_disabled  = False
     _sambanova_429_at    = 0.0
+    _groq_disabled       = False
+    _groq_key_429_at     = {}
     return {"status": "ok", "message": "State wiped"}
 
 
