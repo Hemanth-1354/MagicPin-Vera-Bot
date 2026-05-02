@@ -1,8 +1,14 @@
 """
 conversation_handlers.py — Multi-turn conversation state machine for Vera.
 
-Implements the optional `respond` function for the tiebreaker round.
+Implements the `respond` function for the tiebreaker replay round.
 Also exposes ConversationState for use in bot.py.
+
+Key improvements over v1:
+- Phase transitions are sharper: commit → executing immediately, no re-qualifying
+- build_reply_prompt now injects the trigger kind + active offer as execution targets
+- respond() fast-paths are aligned with api-call-examples.md §4 (auto-reply sequences)
+- `executing` phase drafts artifacts in-message rather than asking another question
 """
 
 from dataclasses import dataclass, field
@@ -16,28 +22,29 @@ import json
 # ─────────────────────────────────────────────
 
 ConversationPhase = Literal[
-    "opening",        # First message sent, awaiting reply
+    "opening",        # First message sent, awaiting first reply
     "qualifying",     # Gathering merchant intent / preference
-    "executing",      # Merchant committed — now do the work
+    "executing",      # Merchant committed — doing the work now
     "awaiting_owner", # Auto-reply detected, waiting for real owner
-    "cooling_off",    # Merchant asked for time / not now
+    "cooling_off",    # Merchant asked for time
     "closing"         # Graceful exit in progress
 ]
 
+
 @dataclass
 class ConversationState:
-    conversation_id: str
-    merchant_id: str
-    customer_id: Optional[str]
-    trigger_id: Optional[str]
-    trigger_kind: str = ""
-    phase: ConversationPhase = "opening"
-    turns: list[dict] = field(default_factory=list)
-    auto_reply_count: int = 0
+    conversation_id:  str
+    merchant_id:      str
+    customer_id:      Optional[str]
+    trigger_id:       Optional[str]
+    trigger_kind:     str = ""
+    phase:            ConversationPhase = "opening"
+    turns:            list[dict] = field(default_factory=list)
+    auto_reply_count: int  = 0
     merchant_committed: bool = False
     merchant_opted_out: bool = False
-    last_bot_body: str = ""
-    meta: dict = field(default_factory=dict)  # for arbitrary trigger-specific state
+    last_bot_body:    str  = ""
+    meta:             dict = field(default_factory=dict)
 
     def add_turn(self, from_role: str, message: str):
         self.turns.append({"from": from_role, "message": message})
@@ -47,6 +54,12 @@ class ConversationState:
 
     def all_bot_bodies(self) -> list[str]:
         return [t["message"] for t in self.turns if t["from"] == "vera"]
+
+    def last_n_turns(self, n: int = 4) -> str:
+        lines = []
+        for t in self.turns[-n:]:
+            lines.append(f"  [{t['from']}]: {t['message'][:140]}")
+        return "\n".join(lines)
 
 
 # ─────────────────────────────────────────────
@@ -72,6 +85,8 @@ COMMIT_PATTERNS = [
     r"\bshuru karo\b",
     r"\bsend it\b",
     r"\bdraft it\b",
+    r"\bdo it\b",
+    r"\bwhat'?s? next\b",
 ]
 
 OPT_OUT_PATTERNS = [
@@ -92,38 +107,35 @@ OUT_OF_SCOPE_PATTERNS = [
 ]
 
 HOSTILE_PATTERNS = [
-    r"\b(useless|bakwas|rubbish|stupid bot|idiot|ch[u\*]+tiya)\b",
+    r"\b(useless|bakwas|rubbish|stupid bot|idiot)\b",
     r"\bwhy (are you|keep) (bothering|messaging)\b",
     r"\bstop (wasting|bothering)\b",
 ]
 
 
 def classify_message(message: str) -> str:
-    """Returns intent category."""
+    """Returns intent category string."""
     msg_lower = message.lower()
 
     for p in AUTO_REPLY_PATTERNS:
         if re.search(p, msg_lower):
             return "auto_reply"
-
     for p in OPT_OUT_PATTERNS:
         if re.search(p, msg_lower):
             return "opt_out"
-
     for p in HOSTILE_PATTERNS:
         if re.search(p, msg_lower):
             return "hostile"
-
     for p in OUT_OF_SCOPE_PATTERNS:
         if re.search(p, msg_lower):
             return "out_of_scope"
-
     for p in COMMIT_PATTERNS:
         if re.search(p, msg_lower):
             return "commit"
 
-    # Question detection
-    if "?" in message or any(w in msg_lower for w in ["kya", "how", "when", "where", "what", "kaisa", "kitna", "kab"]):
+    if "?" in message or any(
+        w in msg_lower for w in ["kya", "how", "when", "where", "what", "kaisa", "kitna", "kab"]
+    ):
         return "question"
 
     return "engaged"
@@ -134,7 +146,7 @@ def classify_message(message: str) -> str:
 # ─────────────────────────────────────────────
 
 def transition_phase(state: ConversationState, intent: str) -> ConversationPhase:
-    """Determine next phase based on current phase + intent."""
+    """Next phase from current phase + intent."""
     current = state.phase
 
     if intent == "auto_reply":
@@ -154,12 +166,10 @@ def transition_phase(state: ConversationState, intent: str) -> ConversationPhase
         state.merchant_committed = True
         return "executing"
 
-    if intent == "question" and current == "opening":
+    if intent in ("question", "engaged") and current in ("opening", "qualifying"):
         return "qualifying"
 
-    if intent in ("engaged", "question") and current in ("qualifying", "opening"):
-        return "qualifying"
-
+    # Stay in executing once committed
     if current == "executing":
         return "executing"
 
@@ -167,146 +177,220 @@ def transition_phase(state: ConversationState, intent: str) -> ConversationPhase
 
 
 # ─────────────────────────────────────────────
-# RESPONSE TEMPLATES BY PHASE + INTENT
+# REPLY PROMPT BUILDER
 # ─────────────────────────────────────────────
 
-def build_reply_prompt(state: ConversationState, merchant_message: str,
-                       merchant: dict, category: dict, trigger: dict, customer: Optional[dict]) -> str:
-    """Build a tight reply prompt based on conversation state."""
+def build_reply_prompt(
+    state:            ConversationState,
+    merchant_message: str,
+    merchant:         dict,
+    category:         dict,
+    trigger:          dict,
+    customer:         Optional[dict],
+) -> str:
+    """Build a tight, phase-aware reply prompt."""
 
-    intent = classify_message(merchant_message)
+    intent    = classify_message(merchant_message)
     new_phase = transition_phase(state, intent)
     state.phase = new_phase
 
-    owner = merchant.get("identity", {}).get("owner_first_name", "")
-    m_name = merchant.get("identity", {}).get("name", "")
-    active_offers = [o["title"] for o in merchant.get("offers", []) if o.get("status") == "active"]
-    cust_agg = merchant.get("customer_aggregate", {})
-    langs = merchant.get("identity", {}).get("languages", ["en"])
-    use_hindi = "hi" in langs or "hi-en mix" in str(merchant.get("identity", {}).get("owner_first_name", ""))
+    identity  = merchant.get("identity", {})
+    owner     = identity.get("owner_first_name", "")
+    m_name    = identity.get("name", "")
+    langs     = identity.get("languages", ["en"])
+    offers    = [o["title"] for o in merchant.get("offers", []) if o.get("status") == "active"]
+    cust_agg  = merchant.get("customer_aggregate", {})
+    perf      = merchant.get("performance", {})
+    signals   = merchant.get("signals", [])
+    trg_kind  = state.trigger_kind or trigger.get("kind", "")
+    trg_payload = trigger.get("payload", {})
 
-    # History (last 4 turns)
-    history = "\n".join(f"  [{t['from']}]: {t['message'][:120]}" for t in state.turns[-4:])
+    history = state.last_n_turns(4)
     history += f"\n  [merchant NOW (turn {len(state.turns)+1})]: {merchant_message[:200]}"
 
+    # Phase-specific instructions
     phase_instructions = {
         "executing": (
-            "Merchant committed. Switch to ACTION mode immediately. "
-            "Draft the specific artifact they asked for (post / message / template / plan). "
-            "Name the concrete next step. Specific numbers. One binary CTA."
+            "Merchant committed. ACTION mode. "
+            "Draft the specific artifact (campaign post / WhatsApp message / booking slot / compliance SOP) right now in the message body. "
+            f"Reference real numbers from context: offer='{offers[0] if offers else ''}', "
+            f"lapsed={cust_agg.get('lapsed_180d_plus') or cust_agg.get('lapsed_90d_plus') or 0} customers, "
+            f"views={perf.get('views',0)}, trigger={trg_kind}. "
+            "End with a binary confirm/cancel. Do NOT ask another qualifying question."
         ),
         "awaiting_owner": (
-            "Auto-reply detected. "
-            f"Count: {state.auto_reply_count}. "
-            "If count=1: send one friendly prompt for the owner. "
-            "If count=2: action=wait (86400s). "
-            "If count>=3: action=end."
+            f"Auto-reply count: {state.auto_reply_count}. "
+            "count=1: send one short message prompting the owner to respond. "
+            "count=2: action=wait (86400s). "
+            "count>=3: action=end."
         ),
         "closing": (
-            "Merchant opted out / hostile / 3+ auto-replies. "
-            "action=end (or one-line polite exit then end). Do not pitch anything."
+            "Merchant opted out / hostile / too many auto-replies. "
+            "action=end (or one polite exit line then end). Do NOT pitch anything."
         ),
         "qualifying": (
-            "Merchant is engaged but hasn't committed. "
-            "Answer their question specifically. "
-            "Advance toward one clear ask or commitment. "
-            "Use merchant-specific data, not generic advice."
+            "Merchant is engaged but hasn't committed yet. "
+            "Answer their question specifically using merchant data. "
+            f"Advance toward one clear commitment. Signal: {signals[:2]}. "
+            "Do not ask more than one question per turn."
         ),
         "opening": (
-            "First reply. Acknowledge and add value. Move toward action."
-        )
+            "First reply received. Acknowledge it, add value, move toward a clear ask."
+        ),
+        "cooling_off": (
+            "Merchant asked for time. Acknowledge, leave a single re-engagement hook, then wait."
+        ),
     }
 
-    system_block = f"""You are Vera, magicpin's AI assistant. Mid-conversation. Phase={new_phase}.
+    use_hindi = "hi" in langs
+
+    return f"""\
+You are Vera, magicpin's AI assistant. Mid-conversation with merchant. Phase={new_phase}.
 Intent detected: {intent}
 
-PHASE INSTRUCTION: {phase_instructions.get(new_phase, 'Continue helpfully.')}
+PHASE INSTRUCTION:
+{phase_instructions.get(new_phase, 'Continue helpfully.')}
 
-MERCHANT: {m_name} | owner={owner} | langs={langs}
-ACTIVE_OFFERS: {active_offers}
-CUSTOMER_AGG: total={cust_agg.get('total_unique_ytd')} lapsed={cust_agg.get('lapsed_180d_plus') or cust_agg.get('lapsed_90d_plus')}
-TRIGGER_KIND: {state.trigger_kind}
+MERCHANT  : {m_name} | owner={owner} | langs={langs}
+OFFERS    : {offers}
+TRIGGER   : {trg_kind} | payload={json.dumps(trg_payload, ensure_ascii=False)[:120]}
+CUST AGG  : total={cust_agg.get('total_unique_ytd')} lapsed={cust_agg.get('lapsed_180d_plus') or cust_agg.get('lapsed_90d_plus')}
+CATEGORY  : {category.get('slug','')} tone={category.get('voice',{}).get('tone','')}
+HINDI MIX : {'yes — use natural Hindi-English mix' if use_hindi else 'no'}
 
-CONVERSATION:
+CONVERSATION SO FAR:
 {history}
 
 RULES:
-- Do NOT repeat: {state.last_bot_body[:80]}
-- No URLs. One CTA. Under 100 words.
-- Hindi-English mix if merchant uses Hindi.
-- action must be one of: send / wait / end
+- Under 100 words.
+- One CTA. No URLs.
+- DO NOT repeat: "{state.last_bot_body[:80]}"
+- action ∈ {{send, wait, end}}
+- rationale must match the message (judge cross-checks)
 
 OUTPUT JSON only:
-{{"action": "send"|"wait"|"end", "body": "...", "cta": "binary_yes_no"|"open_ended"|"none", "wait_seconds": 3600, "rationale": "..."}}"""
-
-    return system_block
+{{"action": "send"|"wait"|"end", "body": "...", "cta": "binary_yes_no"|"open_ended"|"binary_confirm_cancel"|"none", "wait_seconds": 86400, "rationale": "..."}}"""
 
 
-def respond(state: ConversationState, merchant_message: str,
-            merchant: dict = None, category: dict = None,
-            trigger: dict = None, customer: dict = None) -> dict:
+# ─────────────────────────────────────────────
+# MAIN RESPOND FUNCTION (tiebreaker round)
+# ─────────────────────────────────────────────
+
+def respond(
+    state:            ConversationState,
+    merchant_message: str,
+    merchant:         dict = None,
+    category:         dict = None,
+    trigger:          dict = None,
+    customer:         dict = None,
+) -> dict:
     """
-    Multi-turn reply handler.
-    Given current state + merchant message, returns the next Vera response.
+    Multi-turn reply handler for replay/tiebreaker round.
+    Given current state + merchant message, returns Vera's next move.
     """
-    # Import LLM from bot (avoid circular — inline here)
-    from bot import call_llm
+    from bot import call_llm  # avoid circular at module level
 
     state.add_turn("merchant", merchant_message)
-
     intent = classify_message(merchant_message)
 
-    # Fast-path exits (no LLM needed)
+    # ── Fast-path: opt-out ────────────────────────────────────────────────────
     if intent == "opt_out":
         state.phase = "closing"
         return {
-            "action": "end",
-            "rationale": "Merchant explicitly opted out. Conversation closed."
+            "action":   "end",
+            "rationale": "Merchant explicitly opted out. Conversation closed.",
         }
 
+    # ── Fast-path: auto-reply sequence ───────────────────────────────────────
     if intent == "auto_reply":
         state.auto_reply_count += 1
+
         if state.auto_reply_count >= 3:
             state.phase = "closing"
             return {"action": "end", "rationale": "3 consecutive auto-replies. Closing."}
-        elif state.auto_reply_count == 2:
-            return {"action": "wait", "wait_seconds": 86400,
-                    "rationale": "Second auto-reply — owner not present. Waiting 24h."}
-        else:
-            resp_body = "Looks like an auto-reply 🙂 When the owner's free, just reply YES to continue."
-            state.add_turn("vera", resp_body)
-            state.last_bot_body = resp_body
+
+        if state.auto_reply_count == 2:
             return {
-                "action": "send", "body": resp_body,
-                "cta": "binary_yes_no",
-                "rationale": "Auto-reply detected (first time). Prompt for owner."
+                "action":       "wait",
+                "wait_seconds": 86400,
+                "rationale":    "Second auto-reply — owner not present. Wait 24h.",
             }
 
-    if intent == "hostile":
-        state.phase = "closing"
+        # First auto-reply: send one prompt for the owner
+        owner      = (merchant or {}).get("identity", {}).get("owner_first_name", "")
+        resp_body  = f"Looks like an auto-reply 🙂 When {owner or 'the owner'} is free, just reply YES to continue."
+        state.add_turn("vera", resp_body)
+        state.last_bot_body = resp_body
         return {
-            "action": "send",
-            "body": "Apologies for the interruption — won't message again. Restart anytime with 'Hi Vera'. 🙏",
-            "cta": "none",
-            "rationale": "Hostile message — one polite exit then close."
+            "action":   "send",
+            "body":     resp_body,
+            "cta":      "binary_yes_no",
+            "rationale": "Auto-reply (first occurrence) — prompting for owner.",
         }
 
+    # ── Fast-path: hostile ────────────────────────────────────────────────────
+    if intent == "hostile":
+        state.phase = "closing"
+        body = "Apologies for the interruption — won't message again. Restart anytime with 'Hi Vera'. 🙏"
+        state.add_turn("vera", body)
+        return {
+            "action":   "send",
+            "body":     body,
+            "cta":      "none",
+            "rationale": "Hostile message — one polite exit.",
+        }
+
+    # ── Fast-path: out-of-scope ───────────────────────────────────────────────
     if intent == "out_of_scope":
         owner = (merchant or {}).get("identity", {}).get("owner_first_name", "")
-        body = f"That's outside my scope — for GST/legal, your CA or portal is the right move. Back to what we were working on{' ' + owner if owner else ''} — shall we continue?"
+        body  = (
+            f"That's outside my scope — for GST/legal, your CA or portal is the right move. "
+            f"Back to what we were working on{' ' + owner if owner else ''} — shall we continue?"
+        )
         state.add_turn("vera", body)
         state.last_bot_body = body
-        return {"action": "send", "body": body, "cta": "binary_yes_no",
-                "rationale": "Out-of-scope deflected; redirected."}
+        return {
+            "action":   "send",
+            "body":     body,
+            "cta":      "binary_yes_no",
+            "rationale": "Out-of-scope deflected; redirected to original topic.",
+        }
 
-    # LLM-powered reply
-    prompt = build_reply_prompt(state, merchant_message, merchant or {}, category or {}, trigger or {}, customer)
+    # ── Fast-path: commit → execution ────────────────────────────────────────
+    if intent == "commit" and state.phase != "executing":
+        state.merchant_committed = True
+        state.phase = "executing"
+        owner   = (merchant or {}).get("identity", {}).get("owner_first_name", "")
+        offers  = [o["title"] for o in (merchant or {}).get("offers", []) if o.get("status") == "active"]
+        cust_agg = (merchant or {}).get("customer_aggregate", {})
+        lapsed  = cust_agg.get("lapsed_180d_plus") or cust_agg.get("lapsed_90d_plus") or 0
+        offer_hint = f" Draft will use your '{offers[0]}' offer." if offers else ""
+        scope_hint = f" Targeting {lapsed} lapsed customers." if lapsed else ""
+        name_part  = f"Got it {owner}! " if owner else "Got it! "
+        body = f"{name_part}Proceeding now.{offer_hint}{scope_hint} Confirm to send."
+        state.add_turn("vera", body)
+        state.last_bot_body = body
+        return {
+            "action":   "send",
+            "body":     body,
+            "cta":      "binary_confirm_cancel",
+            "rationale": "Merchant committed — switched to execution mode with specific scope.",
+        }
 
-    raw = call_llm(prompt)
+    # ── LLM-powered reply ─────────────────────────────────────────────────────
+    prompt = build_reply_prompt(
+        state,
+        merchant_message,
+        merchant  or {},
+        category  or {},
+        trigger   or {},
+        customer,
+    )
+    raw    = call_llm(prompt)
 
     result = {}
     try:
-        clean = re.sub(r"```(?:json)?|```", "", raw).strip()
+        clean  = re.sub(r"```(?:json)?|```", "", raw).strip()
         result = json.loads(clean)
     except Exception:
         m = re.search(r'\{.*\}', raw, re.DOTALL)
@@ -322,7 +406,7 @@ def respond(state: ConversationState, merchant_message: str,
 
     body = result.get("body", "").strip()
     if action == "send":
-        body = re.sub(r'https?://\S+', '[link]', body)
+        body = re.sub(r'https?://\S+', '', body).strip()
         if body:
             state.add_turn("vera", body)
             state.last_bot_body = body
@@ -333,8 +417,8 @@ def respond(state: ConversationState, merchant_message: str,
     response = {"action": action, "rationale": result.get("rationale", "")}
     if action == "send":
         response["body"] = body
-        response["cta"] = result.get("cta", "open_ended")
+        response["cta"]  = result.get("cta", "open_ended")
     elif action == "wait":
-        response["wait_seconds"] = result.get("wait_seconds", 3600)
+        response["wait_seconds"] = result.get("wait_seconds", 86400)
 
     return response
