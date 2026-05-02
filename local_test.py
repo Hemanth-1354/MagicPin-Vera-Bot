@@ -16,8 +16,8 @@ except ImportError:
 
 BOT_URL = "http://localhost:8080"
 
-PASS = "✅"
-FAIL = "❌"
+PASS = "[PASS]"
+FAIL = "[FAIL]"
 
 results = []
 
@@ -41,10 +41,10 @@ def check(name, condition, detail=""):
     print(f"  {status} {name}" + (f": {detail}" if detail else ""))
 
 
-print("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+print("\n" + "="*40)
 print("  Vera Bot — Local Pre-flight Test")
 print(f"  Target: {BOT_URL}")
-print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+print("="*40 + "\n")
 
 # 1. Healthz
 print("1. GET /v1/healthz")
@@ -159,7 +159,7 @@ if actions:
     check("action has suppression_key", bool(a.get("suppression_key")))
     check("no URLs in body", "http://" not in a.get("body", "")
           and "https://" not in a.get("body", ""))
-    print(f"\n  📩 Sample message:\n  {a.get('body', '')[:200]}")
+    print(f"\n  [MSG] Sample message:\n  {a.get('body', '')[:200]}")
 
     # Tick again — should NOT re-send same suppression_key (idempotency)
     code2, body2 = req("POST", "/v1/tick", tick_payload)
@@ -189,7 +189,7 @@ if actions:
         check("reply within 30s", elapsed < 30, f"{elapsed:.1f}s")
         if body.get("action") == "send":
             check("reply body not empty", bool(body.get("body")))
-            print(f"\n  💬 Reply:\n  {body.get('body', '')[:200]}")
+            print(f"\n  [REPLY] Reply:\n  {body.get('body', '').replace('₹', 'Rs.')[:200]}")
 
         # Auto-reply test
         print("\n8. POST /v1/reply (auto-reply detection)")
@@ -205,20 +205,20 @@ if actions:
         opt_payload = {
             **reply_payload, "message": "Not interested. Stop messaging me.", "turn_number": 4}
         code, body = req("POST", "/v1/reply", opt_payload)
-        check("opt-out → end", body.get("action") == "end", body.get("action"))
+        check("opt-out -> end", body.get("action") == "end", body.get("action"))
 
 else:
-    print("  ℹ️  No actions in tick (LLM may not be configured)")
+    print("  No actions in tick (LLM may not be configured)")
     print("     Set GOOGLE_API_KEY or ANTHROPIC_API_KEY to test composition")
 
 # Summary
-print("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+print("\n" + "="*40)
 passed = sum(1 for _, ok, _ in results if ok)
 total = len(results)
 print(f"  Result: {passed}/{total} checks passed")
 if passed == total:
-    print("  🎉 All checks passed — ready to submit!")
+    print("  All checks passed — ready to submit!")
 else:
     failed = [(n, d) for n, ok, d in results if not ok]
-    print(f"  ⚠️  Failed: {[n for n, _ in failed]}")
-print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+    print(f"  Failed: {[n for n, _ in failed]}")
+print("="*40 + "\n")

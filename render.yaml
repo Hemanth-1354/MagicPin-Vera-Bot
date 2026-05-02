@@ -5,12 +5,16 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn bot:app --host 0.0.0.0 --port $PORT --log-level info
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.0
       - key: GOOGLE_API_KEY
         sync: false
-      - key: ANTHROPIC_API_KEY
+      - key: SAMBANOVA_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
         sync: false
       - key: TEAM_NAME
-        value: YourName
+        value: Vera-Dheera-Soora
       - key: CONTACT_EMAIL
-        value: you@example.com
+        value: your-email@example.com
     healthCheckPath: /v1/healthz
