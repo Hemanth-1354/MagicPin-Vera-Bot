@@ -1,2 +1,0 @@
-﻿Found 30 test pairs
-  [01/30] T01: m_006_southindiancafe_restaurant_bangalore + trg_013_corporate_thali_planning [LLM OK] Groq/llama-3.3-70b-versatile key[0]

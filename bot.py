@@ -995,6 +995,8 @@ RULES:
 4. NO URLs. Hook in line 1. Under 100 words.
 5. NO REFLECTIVE QUESTIONS: Provide analysis, don't ask for it.
 6. SPECIFICITY: Every response MUST contain a numeric anchor (date, price, or metric).
+7. GROUNDING: Do NOT invent numbers in the rationale. Only cite facts from the PEER BENCH, OFFERS, or CUST AGG blocks.
+8. NO RE-PITCHING: If the merchant has already accepted an offer, do NOT explain the offer again. Move to next steps (e.g., target segments, scheduling).
 
 OUTPUT JSON:
 {
@@ -1057,14 +1059,20 @@ def compose_reply(
         cust_agg = merchant.get("customer_aggregate", {})
         total    = cust_agg.get("total_unique_ytd", 0)
         lapsed   = cust_agg.get("lapsed_180d_plus") or cust_agg.get("lapsed_90d_plus") or 0
-        offer_hint = f" I'll draft it around your '{offers[0]}' offer." if offers else ""
-        scope_hint = f" Scope: {lapsed} lapsed customers from your base of {total}." if lapsed else ""
-        name_part  = f"Got it {owner}! " if owner else "Got it! "
+        
+        offer_name = f"'{offers[0]}'" if offers else "this campaign"
+        name_part  = f"Great! {owner}, " if owner else "Great! "
+        
+        if lapsed > 0:
+            body = f"{name_part}I'll set up the {offer_name} campaign for you. Should we target your {lapsed} lapsed patients first to bring them back?"
+        else:
+            body = f"{name_part}I'll set up the {offer_name} campaign for you. Should we push this to your {total} active customers today?"
+            
         return {
             "action": "send",
-            "body":   f"{name_part}Proceeding now.{offer_hint}{scope_hint} Can you confirm to send the draft?",
+            "body":   body,
             "cta":    "binary_confirm_cancel",
-            "rationale": "Merchant committed — switching to execution mode with concrete scope."
+            "rationale": f"Merchant committed to {offer_name}. Transitioning to tactical execution targeting {lapsed or total} customers."
         }
 
     if intent == "opt_out":
