@@ -26,47 +26,27 @@ load_dotenv()
 # CONFIG
 # ─────────────────────────────────────────────
 
-# Groq — primary (4 rotating keys)
-GROQ_API_KEYS: list[str] = []
-for _k in ["GROQ_API_KEY", "GROQ_API_KEY_2", "GROQ_API_KEY_3", "GROQ_API_KEY_4"]:
-    _v = os.getenv(_k, "").strip()
-    if _v: GROQ_API_KEYS.append(_v)
-GROQ_API_KEY = GROQ_API_KEYS[0] if GROQ_API_KEYS else None
-GROQ_MODEL_COMPOSE = "llama-3.3-70b-versatile"
-GROQ_MODEL_REPLY   = "llama-3.1-8b-instant"
-SAMBANOVA_MODEL_COMPOSE = "Meta-Llama-3.1-70B-Instruct"
-SAMBANOVA_MODEL_REPLY   = "Meta-Llama-3.2-8B-Instruct"
-GROQ_BASE_URL      = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_COOLDOWN_S    = 60
-_groq_key_429_at   = {} # key_idx -> timestamp
-_groq_disabled     = False
+# SambaNova — PRIMARY
+SAMBANOVA_API_KEY       = os.getenv("SAMBANOVA_API_KEY", "").strip()
+SAMBANOVA_MODEL_COMPOSE = "Meta-Llama-3.3-70B-Instruct"
+SAMBANOVA_MODEL_REPLY   = "Meta-Llama-3.1-8B-Instruct"
+SAMBANOVA_BASE_URL      = "https://api.sambanova.ai/v1/chat/completions"
+_sambanova_disabled     = False
+SAMBANOVA_COOLDOWN_S    = 30
+_sambanova_429_at       = 0.0
 
-# OpenRouter free models — highly unstable, using many as fallbacks
-OPENROUTER_MODELS_COMPOSE = [
-    "meta-llama/llama-3.3-70b-instruct",
-    "google/gemini-2.0-flash-exp:free",
-    "mistralai/mistral-small-24b-instruct-2501:free",
-    "google/gemma-3-27b-it:free",
-]
-OPENROUTER_MODELS_REPLY = [
-    "meta-llama/llama-3.1-8b-instruct",
-    "google/gemini-2.0-flash-exp:free",
-    "google/gemma-3-27b-it:free",
-]
-
-# Gemini — secondary fallback (4 rotating keys)
-GOOGLE_MODEL     = "gemini-1.5-flash-latest"
-GOOGLE_MODEL_ALT = "gemini-1.5-flash"
-AS_MODEL_REPLY   = "llama-3.1-8b"
+# Gemini — SECONDARY
+GOOGLE_MODEL     = "gemini-2.0-flash"
+GOOGLE_MODEL_ALT = "gemini-1.5-flash-latest"
 GOOGLE_API_KEYS: list[str] = []
 for _k in ["GOOGLE_API_KEY", "GOOGLE_API_KEY_2", "GOOGLE_API_KEY_3", "GOOGLE_API_KEY_4"]:
     _v = os.getenv(_k, "").strip()
     if _v:
         GOOGLE_API_KEYS.append(_v)
 
-# Anthropic — tertiary fallback
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-_anthropic_disabled = False  # tripped on billing/credit errors
+GEMINI_COOLDOWN_S    = 60
+_gemini_key_index    = 0
+_gemini_key_429_at: dict[int, float] = {}
 
 TEAM_NAME       = os.getenv("TEAM_NAME", "Vera Dheera Soora")
 TEAM_MEMBERS    = os.getenv("TEAM_MEMBERS", "Candidate")
@@ -75,43 +55,6 @@ BOT_VERSION     = "4.1.0"
 
 app = FastAPI(title="MagicPin Vera Bot", version=BOT_VERSION)
 START_TIME = time.time()
-
-# ── Gemini per-key cooldown ──────────────────
-# If a key hits 429, skip it for GEMINI_COOLDOWN_S seconds before retrying.
-GEMINI_COOLDOWN_S   = 60
-_gemini_key_index   = 0
-_gemini_call_counts = [0] * max(len(GOOGLE_API_KEYS), 1)
-_gemini_key_429_at: dict[int, float] = {}   # key_idx → epoch when it last 429'd
-
-# ── Groq circuit breaker ─────────────────────
-# On 403 (Cloudflare/IP block) or repeated failures, flip this flag
-# so the entire Groq path is skipped instantly for the rest of the session.
-_groq_disabled = False
-
-# Together AI — PRIMARY free LLM (AWS, no Cloudflare 1010 blocks)
-# Free permanent Llama models, no credit card. Sign up: https://api.together.ai
-TOGETHER_API_KEY       = os.getenv("TOGETHER_API_KEY", "").strip()
-TOGETHER_MODEL_COMPOSE = "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free"
-TOGETHER_MODEL_REPLY   = "meta-llama/Llama-3.1-8B-Instruct-Turbo-Free"
-TOGETHER_BASE_URL      = "https://api.together.xyz/v1/chat/completions"
-_together_disabled     = False
-
-# SambaNova — SECONDARY free LLM (own silicon, no Cloudflare 1010 blocks)
-# Free ~1000 req/day. Sign up: https://cloud.sambanova.ai
-SAMBANOVA_API_KEY       = os.getenv("SAMBANOVA_API_KEY", "").strip()
-SAMBANOVA_MODEL_COMPOSE = "Meta-Llama-3.3-70B-Instruct"
-SAMBANOVA_MODEL_REPLY   = "Meta-Llama-3.1-8B-Instruct"
-SAMBANOVA_BASE_URL      = "https://api.sambanova.ai/v1/chat/completions"
-_sambanova_disabled     = False
-
-# Cerebras / Groq kept as lower-priority fallback (Cloudflare-blocked on some IPs)
-CEREBRAS_API_KEY       = os.getenv("CEREBRAS_API_KEY", "").strip()
-CEREBRAS_MODEL_COMPOSE = "llama-3.3-70b"
-CEREBRAS_MODEL_REPLY   = "llama-3.1-8b"
-CEREBRAS_BASE_URL      = "https://api.cerebras.ai/v1/chat/completions"
-_cerebras_disabled     = False
-
-GOOGLE_MODEL_ALT = "gemini-1.5-flash-latest"
 
 # ─────────────────────────────────────────────
 # TRAFFIC TRACKING (RPM / TPM)
@@ -575,7 +518,7 @@ SAMBANOVA_COOLDOWN_S    = 30
 
 # ── Gemini ────────────────────────────────────
 # Use gemini-1.5-flash-latest as primary due to high stability
-GOOGLE_MODEL     = "gemini-2.0-flash"
+GOOGLE_MODEL     = "gemini-1.5-flash"
 GOOGLE_MODEL_ALT = "gemini-1.5-flash-latest"
 GOOGLE_API_KEYS: list[str] = []
 for _k in ["GOOGLE_API_KEY", "GOOGLE_API_KEY_2", "GOOGLE_API_KEY_3", "GOOGLE_API_KEY_4"]:
@@ -586,6 +529,20 @@ GEMINI_COOLDOWN_S    = 60
 _gemini_key_index    = 0
 _gemini_call_counts  = [0] * max(len(GOOGLE_API_KEYS), 1)
 _gemini_key_429_at: dict[int, float] = {}
+
+# ── Groq ──────────────────────────────────────
+GROQ_API_KEYS: list[str] = []
+for _k in ["GROQ_API_KEY", "GROQ_API_KEY_2", "GROQ_API_KEY_3", "GROQ_API_KEY_4"]:
+    _v = os.getenv(_k, "").strip()
+    if _v:
+        GROQ_API_KEYS.append(_v)
+
+GROQ_MODEL_COMPOSE = "llama-3.3-70b-versatile"
+GROQ_MODEL_REPLY   = "llama-3.1-8b-instant"
+GROQ_BASE_URL      = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_COOLDOWN_S    = 30
+_groq_key_429_at: dict[int, float] = {}
+_groq_disabled     = False
 
 # ── Anthropic (tertiary, needs credits) ──────
 ANTHROPIC_API_KEY    = os.getenv("ANTHROPIC_API_KEY", "")
@@ -613,6 +570,7 @@ def _post_json(url: str, body: dict, headers: dict, timeout: int = 7) -> dict:
     input_tokens = len(input_str) // 4
     
     data = json.dumps(body).encode()
+    headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     req  = urllib.request.Request(url, data=data, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -634,119 +592,8 @@ def _post_json(url: str, body: dict, headers: dict, timeout: int = 7) -> dict:
 # PROVIDER FUNCTIONS
 # ─────────────────────────────────────────────
 
-def call_groq(prompt: str, model: str) -> str:
-    """Groq — 4 rotating keys with per-key cooldown."""
-    global _groq_disabled
-    if not GROQ_API_KEYS:
-        raise RuntimeError("GROQ_API_KEYS not set")
-    if _groq_disabled:
-        raise RuntimeError("Groq circuit breaker open")
-
-    n = len(GROQ_API_KEYS)
-    now = time.time()
-    available = [i for i in range(n) if now - _groq_key_429_at.get(i, 0) > GROQ_COOLDOWN_S]
-    if not available:
-        available = sorted(range(n), key=lambda i: _groq_key_429_at.get(i, 0))
-
-    system, user = _split_prompt(prompt)
-    
-    for idx in available:
-        key = GROQ_API_KEYS[idx]
-        try:
-            data = _post_json(
-                GROQ_BASE_URL,
-                {
-                    "model":       model,
-                    "messages":    [{"role": "system", "content": system},
-                                    {"role": "user",   "content": user}],
-                    "temperature": 0.0,
-                    "max_tokens":  512,
-                },
-                {
-                    "Content-Type":  "application/json",
-                    "Authorization": f"Bearer {key}",
-                }
-            )
-            result = data["choices"][0]["message"]["content"].strip()
-            print(f"[LLM OK] Groq/{model} key[{idx}]")
-            return result
-        except RuntimeError as e:
-            msg = str(e)
-            if "429" in msg:
-                _groq_key_429_at[idx] = time.time()
-                print(f"[Groq] key[{idx}] 429 — cooling {GROQ_COOLDOWN_S}s")
-                continue
-            if any(c in msg for c in ("403", "401")):
-                # On Render, 403 might mean just ONE key is flagged, so we skip it for 5m
-                _groq_key_429_at[idx] = time.time() + 300
-                print(f"[Groq] key[{idx}] {msg[:40]} — skipping 5m")
-                continue
-            raise
-    raise RuntimeError("All Groq keys rate-limited or blocked")
 
 
-def call_openrouter(prompt: str, model_pool: list) -> str:
-    """
-    OpenRouter with model rotation.
-    Tries each model in pool independently — each has its own upstream rate limit.
-    On 429, marks that model cooling and tries next one immediately.
-    """
-    global _openrouter_disabled
-    if not OPENROUTER_API_KEY:
-        raise RuntimeError("OPENROUTER_API_KEY not set")
-    if _openrouter_disabled:
-        raise RuntimeError("OpenRouter circuit breaker open")
-
-    system, user = _split_prompt(prompt)
-    now = time.time()
-    # Build list of models not currently in cooldown
-    available = [m for m in model_pool
-                 if now - _or_model_429_at.get(m, 0) > OPENROUTER_COOLDOWN_S]
-    if not available:
-        # All cooling — pick the one that cooled down longest ago
-        available = sorted(model_pool, key=lambda m: _or_model_429_at.get(m, 0))
-
-    last_err = None
-    for model in available:
-        try:
-            # Handle models that don't support 'system' messages by merging into 'user'
-            if any(p in model.lower() for p in ("gemma", "mistral", "phi")):
-                messages = [{"role": "user", "content": f"{system}\n\n{user}"}]
-            else:
-                messages = [{"role": "system", "content": system},
-                            {"role": "user",   "content": user}]
-
-            data = _post_json(
-                OPENROUTER_BASE_URL,
-                {
-                    "model":       model,
-                    "messages":    messages,
-                    "temperature": 0.0,
-                    "max_tokens":  512,
-                },
-                {
-                    "Content-Type":  "application/json",
-                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                    "HTTP-Referer":  "https://magicpin.in",
-                    "X-Title":       "Vera Merchant Bot",
-                }
-            )
-            result = data["choices"][0]["message"]["content"].strip()
-            print(f"[LLM OK] OpenRouter/{model.split('/')[-1]}")
-            return result
-        except RuntimeError as e:
-            msg = str(e)
-            if "429" in msg:
-                _or_model_429_at[model] = time.time()
-                print(f"[OpenRouter] {model.split('/')[-1]} 429 — trying next model")
-                last_err = e
-                continue   # immediately try next model, no sleep
-            elif any(c in msg for c in ("403", "401")):
-                _openrouter_disabled = True
-                print(f"[OpenRouter] circuit breaker tripped: {msg[:60]}")
-                raise
-            raise
-    raise last_err or RuntimeError("All OpenRouter models rate-limited")
 
 
 def call_sambanova(prompt: str, model: str) -> str:
@@ -787,6 +634,60 @@ def call_sambanova(prompt: str, model: str) -> str:
             _sambanova_disabled = True
             print(f"[SambaNova] circuit breaker tripped: {msg[:80]}")
         raise
+    
+    
+def call_groq(prompt: str, model: str) -> str:
+    """Groq — rotating keys, OpenAI-compatible API."""
+    global _groq_disabled
+    if not GROQ_API_KEYS:
+        raise RuntimeError("No Groq API keys configured")
+    if _groq_disabled:
+        raise RuntimeError("Groq circuit breaker open")
+
+    n   = len(GROQ_API_KEYS)
+    now = time.time()
+    available = [i for i in range(n) if now - _groq_key_429_at.get(i, 0) > GROQ_COOLDOWN_S]
+    
+    if not available:
+        # If all in cooldown, pick the one that cools down soonest
+        available = sorted(range(n), key=lambda i: _groq_key_429_at.get(i, 0))
+
+    system, user = _split_prompt(prompt)
+    
+    for key_idx in available:
+        key = GROQ_API_KEYS[key_idx]
+        try:
+            data = _post_json(
+                GROQ_BASE_URL,
+                {
+                    "model":       model,
+                    "messages":    [{"role": "system", "content": system},
+                                    {"role": "user",   "content": user}],
+                    "temperature": 0.0,
+                    "max_tokens":  512,
+                },
+                {
+                    "Content-Type":  "application/json",
+                    "Authorization": f"Bearer {key}",
+                }
+            )
+            result = data["choices"][0]["message"]["content"].strip()
+            print(f"[LLM OK] Groq/{model} key[{key_idx}]")
+            return result
+        except RuntimeError as e:
+            msg = str(e)
+            if "429" in msg:
+                _groq_key_429_at[key_idx] = time.time()
+                print(f"[Groq] key[{key_idx}] 429 rate limit — cooling {GROQ_COOLDOWN_S}s")
+                continue # try next key
+            elif any(c in msg for c in ("403", "401")):
+                # Check if this is a terminal error for THIS key or the provider
+                _groq_key_429_at[key_idx] = time.time() + 86400 # skip 24h
+                print(f"[Groq] key[{key_idx}] auth error: {msg[:80]}")
+                continue
+            raise
+    
+    raise RuntimeError("All Groq keys rate-limited or failed")
 
 
 def call_gemini(prompt: str) -> str:
@@ -836,96 +737,6 @@ def call_gemini(prompt: str) -> str:
     raise RuntimeError("All Gemini keys rate-limited or restricted")
 
 
-def call_anthropic(prompt: str) -> str:
-    """Anthropic Claude Haiku — tertiary, needs credits."""
-    import urllib.request, urllib.error
-    global _anthropic_disabled
-    if not ANTHROPIC_API_KEY: raise RuntimeError("No Anthropic key")
-    if _anthropic_disabled:   raise RuntimeError("Anthropic: no credits (circuit open)")
-
-    system, user = _split_prompt(prompt)
-    try:
-        data = _post_json(
-            "https://api.anthropic.com/v1/messages",
-            {"model": "claude-3-haiku-20240307", "max_tokens": 512,
-             "system": system, "messages": [{"role": "user", "content": user}]},
-            {"Content-Type": "application/json", "x-api-key": ANTHROPIC_API_KEY,
-             "anthropic-version": "2023-06-01"}
-        )
-        result = data["content"][0]["text"].strip()
-        print("[LLM OK] Anthropic/claude-3-haiku")
-        return result
-    except RuntimeError as e:
-        if "400" in str(e) and "credit" in str(e).lower():
-            _anthropic_disabled = True
-            print("[Anthropic] no credits — circuit breaker tripped permanently")
-        raise
-
-
-def call_together(prompt: str, model: str) -> str:
-    """Together AI — primary fallback."""
-    global _together_disabled
-    if not TOGETHER_API_KEY:
-        raise RuntimeError("TOGETHER_API_KEY not set")
-    if _together_disabled:
-        raise RuntimeError("Together circuit breaker open")
-
-    system, user = _split_prompt(prompt)
-    try:
-        data = _post_json(
-            TOGETHER_BASE_URL,
-            {
-                "model":       model,
-                "messages":    [{"role": "system", "content": system},
-                                {"role": "user",   "content": user}],
-                "temperature": 0.0,
-                "max_tokens":  512,
-            },
-            {
-                "Content-Type":  "application/json",
-                "Authorization": f"Bearer {TOGETHER_API_KEY}",
-            }
-        )
-        result = data["choices"][0]["message"]["content"].strip()
-        print(f"[LLM OK] Together/{model}")
-        return result
-    except RuntimeError as e:
-        if any(c in str(e) for c in ("403", "401")):
-            _together_disabled = True
-        raise
-
-
-def call_cerebras(prompt: str, model: str) -> str:
-    """Cerebras — ultra-fast fallback."""
-    global _cerebras_disabled
-    if not CEREBRAS_API_KEY:
-        raise RuntimeError("CEREBRAS_API_KEY not set")
-    if _cerebras_disabled:
-        raise RuntimeError("Cerebras circuit breaker open")
-
-    system, user = _split_prompt(prompt)
-    try:
-        data = _post_json(
-            CEREBRAS_BASE_URL,
-            {
-                "model":       model,
-                "messages":    [{"role": "system", "content": system},
-                                {"role": "user",   "content": user}],
-                "temperature": 0.0,
-                "max_tokens":  512,
-            },
-            {
-                "Content-Type":  "application/json",
-                "Authorization": f"Bearer {CEREBRAS_API_KEY}",
-            }
-        )
-        result = data["choices"][0]["message"]["content"].strip()
-        print(f"[LLM OK] Cerebras/{model}")
-        return result
-    except RuntimeError as e:
-        if any(c in str(e) for c in ("403", "401")):
-            _cerebras_disabled = True
-        raise
 
 
 # ─────────────────────────────────────────────
@@ -940,56 +751,73 @@ _HEURISTIC_FALLBACK = json.dumps({
 
 
 def call_llm_compose(prompt: str) -> str:
-    """
-    /v1/tick — quality matters most.
-    SambaNova 70b -> OpenRouter 70b -> Groq 70b -> heuristic
-    """
-    if SAMBANOVA_API_KEY and not _sambanova_disabled:
-        try: return call_sambanova(prompt, SAMBANOVA_MODEL_COMPOSE)
-        except Exception as e: print(f"[SambaNova 70b] {e}")
-    if OPENROUTER_API_KEY and not _openrouter_disabled:
-        try: return call_openrouter(prompt, OPENROUTER_MODELS_COMPOSE)
-        except Exception as e: print(f"[OpenRouter 70b] {e}")
-    if GROQ_API_KEY and not _groq_disabled:
-        try: return call_groq(prompt, GROQ_MODEL_COMPOSE)
-        except Exception as e: print(f"[Groq 70b] {e}")
+    """/v1/tick — Groq Primary -> Groq Fallback -> heuristic"""
+    if GROQ_API_KEYS and not _groq_disabled:
+        try:
+            return call_groq(prompt, GROQ_MODEL_COMPOSE)
+        except Exception as e:
+            print(f"[Groq Primary Failed] {e}")
+            try:
+                print(f"[Groq Fallback] Trying secondary model {GROQ_MODEL_REPLY}...")
+                return call_groq(prompt, GROQ_MODEL_REPLY)
+            except Exception as e2:
+                print(f"[Groq Fallback Failed] {e2}")
     return _HEURISTIC_FALLBACK
 
 
 def call_llm_reply(prompt: str) -> str:
-    """
-    /v1/reply — speed matters most.
-    SambaNova 8b -> OpenRouter 8b -> Groq 8b -> heuristic
-    """
-    if SAMBANOVA_API_KEY and not _sambanova_disabled:
-        try: return call_sambanova(prompt, SAMBANOVA_MODEL_REPLY)
-        except Exception as e: print(f"[SambaNova 8b] {e}")
-    if OPENROUTER_API_KEY and not _openrouter_disabled:
-        try: return call_openrouter(prompt, OPENROUTER_MODELS_REPLY)
-        except Exception as e: print(f"[OpenRouter 8b] {e}")
-    if GROQ_API_KEY and not _groq_disabled:
-        try: return call_groq(prompt, GROQ_MODEL_REPLY)
-        except Exception as e: print(f"[Groq 8b] {e}")
+    """/v1/reply — Groq Primary -> Groq Fallback -> heuristic"""
+    if GROQ_API_KEYS and not _groq_disabled:
+        try:
+            return call_groq(prompt, GROQ_MODEL_REPLY)
+        except Exception as e:
+            print(f"[Groq Reply Failed] {e}")
+            try:
+                print(f"[Groq Reply Fallback] Trying {GROQ_MODEL_COMPOSE}...")
+                return call_groq(prompt, GROQ_MODEL_COMPOSE)
+            except Exception as e2:
+                print(f"[Groq Reply Fallback Failed] {e2}")
     return json.dumps({
         "action": "send",
         "body":   "Thanks for your message — let me look into that.",
-        "cta":    "none",
-        "rationale": "Heuristic fallback — LLM unavailable"
+        "rationale": "Heuristic fallback — Groq unavailable"
     })
 
 
 def parse_llm_json(raw: str) -> dict:
-    """Robustly parse JSON from LLM output."""
+    """Robustly parse JSON from LLM output, with regex fallback."""
+    print(f"[LLM RAW] {raw[:500]}...")
+    
+    # 1. Try standard JSON parser (flattening literal newlines first)
     try:
         clean = re.sub(r"```(?:json)?|```", "", raw).strip()
+        # Flatten unescaped newlines to spaces to prevent control char errors
+        clean = clean.replace('\n', ' ').replace('\r', '')
         return json.loads(clean)
-    except Exception:
-        m = re.search(r'\{.*\}', raw, re.DOTALL)
-        if m:
-            try:
-                return json.loads(m.group())
-            except Exception:
-                pass
+    except Exception as e:
+        print(f"[JSON PARSE ERROR] Standard parse failed: {e}")
+        
+    # 2. Indestructible Regex Fallback
+    print("[JSON PARSE] Attempting regex fallback extraction...")
+    result = {}
+    
+    # Match "body": "..." handling escaped quotes and literal newlines
+    body_match = re.search(r'"body"\s*:\s*"((?:\\.|[^"\\])*)"', raw, re.IGNORECASE)
+    if body_match:
+        result["body"] = body_match.group(1).replace('\\"', '"').replace('\n', ' ')
+        
+    cta_match = re.search(r'"cta"\s*:\s*"([^"]+)"', raw, re.IGNORECASE)
+    if cta_match:
+        result["cta"] = cta_match.group(1)
+        
+    rat_match = re.search(r'"rationale"\s*:\s*"((?:\\.|[^"\\])*)"', raw, re.IGNORECASE)
+    if rat_match:
+        result["rationale"] = rat_match.group(1).replace('\\"', '"').replace('\n', ' ')
+        
+    if "body" in result:
+        return result
+        
+    print("[JSON PARSE ERROR] Regex extraction also failed.")
     return {}
 
 
@@ -1469,10 +1297,11 @@ def select_and_compose_actions(available_triggers: list[str], now: str) -> list[
         }
 
         # Small sleep between compositions to avoid RPM bursts
-        # Groq is ~200ms/call so 0.2s gap is plenty; Gemini cooldown handles the rest
+        # SambaNova is ~500ms/call so 0.2s gap is plenty; Gemini cooldown handles the rest
         if len(actions) < 20:
             time.sleep(0.2)
 
+    print(f"[TICK] Returning {len(actions)} actions")
     return actions
 
 
@@ -1506,7 +1335,7 @@ async def healthz():
 
 @app.get("/v1/metadata")
 async def metadata():
-    model_primary = GROQ_MODEL_COMPOSE if GROQ_API_KEY else (GOOGLE_MODEL if GOOGLE_API_KEYS else "claude-opus-4-7")
+    model_primary = GROQ_MODEL_COMPOSE if GROQ_API_KEYS else "Heuristic"
     return {
         "team_name":    TEAM_NAME,
         "team_members": TEAM_MEMBERS.split(","),
@@ -1635,17 +1464,12 @@ async def teardown():
     conversations.clear()
     fired_suppressions.clear()
     seen_auto_reply_msgs.clear()
-    global _gemini_key_index, _gemini_call_counts, _gemini_key_429_at,\
-           _openrouter_disabled, _or_model_429_at,\
-           _sambanova_disabled, _sambanova_429_at, _anthropic_disabled
+    global _gemini_key_index, _gemini_key_429_at,\
+           _sambanova_disabled, _sambanova_429_at
     _gemini_key_index    = 0
-    _gemini_call_counts  = [0] * max(len(GOOGLE_API_KEYS), 1)
     _gemini_key_429_at   = {}
-    _openrouter_disabled = False
-    _or_model_429_at.clear()
     _sambanova_disabled  = False
     _sambanova_429_at    = 0.0
-    _anthropic_disabled  = False
     return {"status": "ok", "message": "State wiped"}
 
 
