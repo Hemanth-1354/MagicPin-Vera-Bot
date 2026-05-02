@@ -7,7 +7,12 @@ LLM: Google Gemini Flash (free tier — generous quota, fast, low cost)
 Fallback: Claude Haiku via Anthropic API (if ANTHROPIC_API_KEY set)
 """
 
-import os, time, json, re, hashlib, uuid
+import os
+import time
+import json
+import re
+import hashlib
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -19,44 +24,55 @@ from pydantic import BaseModel
 # CONFIG — set via env vars before deployment
 # ─────────────────────────────────────────────
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")          # free Gemini Flash
+GOOGLE_MODEL = os.getenv("GEMINI_MODEL")  # optional model selection
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")    # optional fallback
 TEAM_NAME = os.getenv("TEAM_NAME", "Vera-Builder")
 TEAM_MEMBERS = os.getenv("TEAM_MEMBERS", "Candidate")
 CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "candidate@example.com")
 BOT_VERSION = "2.0.0"
 
-app = FastAPI(title="Vera Bot", version=BOT_VERSION)
+app = FastAPI(title="MagicPin Vera Bot", version=BOT_VERSION)
 START_TIME = time.time()
 
 # ─────────────────────────────────────────────
 # IN-MEMORY STATE
 # ─────────────────────────────────────────────
-contexts: dict[tuple[str, str], dict] = {}      # (scope, context_id) → {version, payload}
-conversations: dict[str, dict] = {}              # conv_id → {turns:[], merchant_id, customer_id, trigger_id, suppressed, ended}
-fired_suppressions: set[str] = set()             # suppression_keys already sent
+# (scope, context_id) → {version, payload}
+contexts: dict[tuple[str, str], dict] = {}
+# conv_id → {turns:[], merchant_id, customer_id, trigger_id, suppressed, ended}
+conversations: dict[str, dict] = {}
+# suppression_keys already sent
+fired_suppressions: set[str] = set()
 
 # ─────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────
 
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
 
 def get_ctx(scope: str, ctx_id: str) -> Optional[dict]:
     entry = contexts.get((scope, ctx_id))
     return entry["payload"] if entry else None
 
+
 def get_merchant(merchant_id: str) -> Optional[dict]:
     return get_ctx("merchant", merchant_id)
+
 
 def get_category(slug: str) -> Optional[dict]:
     return get_ctx("category", slug)
 
+
 def get_customer(customer_id: str) -> Optional[dict]:
     return get_ctx("customer", customer_id)
 
+
 def get_trigger(trigger_id: str) -> Optional[dict]:
     return get_ctx("trigger", trigger_id)
+
 
 def detect_auto_reply(message: str) -> bool:
     """Detect WhatsApp Business canned auto-replies."""
@@ -76,21 +92,23 @@ def detect_auto_reply(message: str) -> bool:
     msg_lower = message.lower()
     return any(p in msg_lower for p in patterns)
 
+
 def detect_explicit_intent(message: str) -> Optional[str]:
     """Detect clear merchant intent transitions."""
     msg_lower = message.lower()
     # Positive/action intent
     if any(p in msg_lower for p in ["let's do it", "lets do it", "ok do it", "go ahead", "yes let's", "haan karo",
-                                      "confirm", "proceed", "start karo", "shuru karo", "yes please", "bilkul"]):
+                                    "confirm", "proceed", "start karo", "shuru karo", "yes please", "bilkul"]):
         return "commit"
     # Negative/opt-out
     if any(p in msg_lower for p in ["not interested", "stop messaging", "stop", "band karo", "mat karo",
-                                      "unsubscribe", "do not contact", "mujhe nahi chahiye", "nahi chahiye"]):
+                                    "unsubscribe", "do not contact", "mujhe nahi chahiye", "nahi chahiye"]):
         return "opt_out"
     # Out of scope
     if any(p in msg_lower for p in ["gst", "income tax", "loan", "insurance", "property", "legal advice"]):
         return "out_of_scope"
     return None
+
 
 def is_repeat_auto_reply(conv_id: str, message: str) -> int:
     """Count how many times this exact (or near-identical) auto-reply appeared."""
@@ -108,15 +126,25 @@ def is_repeat_auto_reply(conv_id: str, message: str) -> int:
 def call_gemini(prompt: str) -> str:
     """Call Google Gemini Flash (free tier) for composition."""
     import urllib.request
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GOOGLE_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GOOGLE_MODEL}:generateContent?key={GOOGLE_API_KEY}"
     body = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.0, "maxOutputTokens": 512}
     }).encode()
-    req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(url, data=body, headers={
+                                 "Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=25) as resp:
         data = json.loads(resp.read())
     return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+
+
+
+
+
+
+
+
 
 def call_anthropic(prompt: str) -> str:
     """Call Anthropic Claude Haiku as fallback."""
@@ -137,6 +165,7 @@ def call_anthropic(prompt: str) -> str:
         data = json.loads(resp.read())
     return data["content"][0]["text"].strip()
 
+
 def call_llm(prompt: str) -> str:
     """Call LLM with fallback chain."""
     if GOOGLE_API_KEY:
@@ -150,6 +179,7 @@ def call_llm(prompt: str) -> str:
         except Exception as e:
             print(f"Anthropic error: {e}")
     return fallback_compose_heuristic(prompt)
+
 
 def fallback_compose_heuristic(prompt: str) -> str:
     """Pure-logic fallback if no LLM key — uses signal extraction."""
@@ -187,8 +217,9 @@ OUTPUT: Return ONLY a JSON object with these fields:
 
 No markdown, no explanation, just the JSON."""
 
+
 def build_compose_prompt(category: dict, merchant: dict, trigger: dict, customer: Optional[dict] = None,
-                          conv_history: list = None) -> str:
+                         conv_history: list = None) -> str:
     """Build a tight, token-efficient prompt for composition."""
 
     # Extract key signals
@@ -200,7 +231,8 @@ def build_compose_prompt(category: dict, merchant: dict, trigger: dict, customer
     perf = merchant.get("performance", {})
     peer = category.get("peer_stats", {})
     signals = merchant.get("signals", [])
-    active_offers = [o for o in merchant.get("offers", []) if o.get("status") == "active"]
+    active_offers = [o for o in merchant.get(
+        "offers", []) if o.get("status") == "active"]
     cust_agg = merchant.get("customer_aggregate", {})
     review_themes = merchant.get("review_themes", [])
 
@@ -228,19 +260,19 @@ def build_compose_prompt(category: dict, merchant: dict, trigger: dict, customer
     ctr_vs_peer = f"{ctr:.3f} vs peer {peer_ctr:.3f} ({'BELOW' if ctr < peer_ctr else 'ABOVE'} peer)"
 
     # Build the slim context block
-    ctx_block = f"""CATEGORY: {category.get('slug')} | tone={category.get('voice',{}).get('tone')} | code_mix={category.get('voice',{}).get('code_mix')}
-taboo_words={category.get('voice',{}).get('vocab_taboo',[])}
+    ctx_block = f"""CATEGORY: {category.get('slug')} | tone={category.get('voice', {}).get('tone')} | code_mix={category.get('voice', {}).get('code_mix')}
+taboo_words={category.get('voice', {}).get('vocab_taboo', [])}
 
 MERCHANT:
   name={m_name} | owner={owner} | city={city}/{locality}
   languages={langs}
-  plan={merchant.get('subscription',{}).get('status')} {merchant.get('subscription',{}).get('plan')} {merchant.get('subscription',{}).get('days_remaining')}d remaining
+  plan={merchant.get('subscription', {}).get('status')} {merchant.get('subscription', {}).get('plan')} {merchant.get('subscription', {}).get('days_remaining')}d remaining
   perf_30d: views={perf.get('views')} calls={perf.get('calls')} directions={perf.get('directions')} ctr={ctr_vs_peer}
-  delta_7d: views={perf.get('delta_7d',{}).get('views_pct')} calls={perf.get('delta_7d',{}).get('calls_pct')}
+  delta_7d: views={perf.get('delta_7d', {}).get('views_pct')} calls={perf.get('delta_7d', {}).get('calls_pct')}
   active_offers={[o['title'] for o in active_offers]}
   customer_agg: total={cust_agg.get('total_unique_ytd')} lapsed={cust_agg.get('lapsed_180d_plus') or cust_agg.get('lapsed_90d_plus')} retention={cust_agg.get('retention_6mo_pct') or cust_agg.get('retention_3mo_pct')}
   signals={signals}
-  review_themes={[(r['theme'],r['sentiment'],r['occurrences_30d']) for r in review_themes]}
+  review_themes={[(r['theme'], r['sentiment'], r['occurrences_30d']) for r in review_themes]}
 """
 
     if cust_agg.get("high_risk_adult_count"):
@@ -251,10 +283,10 @@ MERCHANT:
 DIGEST ITEM (this is WHY we're messaging):
   title={digest_item.get('title')}
   source={digest_item.get('source')}
-  trial_n={digest_item.get('trial_n','')}
-  patient_segment={digest_item.get('patient_segment','')}
-  summary={digest_item.get('summary','')}
-  actionable={digest_item.get('actionable','')}
+  trial_n={digest_item.get('trial_n', '')}
+  patient_segment={digest_item.get('patient_segment', '')}
+  summary={digest_item.get('summary', '')}
+  actionable={digest_item.get('actionable', '')}
 """
 
     ctx_block += f"""
@@ -270,9 +302,9 @@ TRIGGER:
 CUSTOMER (message is sent on behalf of merchant TO this customer):
   name={cust_id.get('name')} | lang_pref={cust_id.get('language_pref')}
   state={customer.get('state')} | last_visit={rel.get('last_visit')} | visits={rel.get('visits_total')}
-  services={rel.get('services_received',[])}
-  preferred_slots={customer.get('preferences',{}).get('preferred_slots')}
-  consent_scope={customer.get('consent',{}).get('scope',[])}
+  services={rel.get('services_received', [])}
+  preferred_slots={customer.get('preferences', {}).get('preferred_slots')}
+  consent_scope={customer.get('consent', {}).get('scope', [])}
   send_as=merchant_on_behalf (from merchant's WA number, drafted by Vera)
 """
 
@@ -280,7 +312,7 @@ CUSTOMER (message is sent on behalf of merchant TO this customer):
         last_turns = conv_history[-3:]
         ctx_block += "\nRECENT CONVERSATION:\n"
         for t in last_turns:
-            ctx_block += f"  [{t.get('from','')}]: {str(t.get('body', t.get('message','')))[:120]}\n"
+            ctx_block += f"  [{t.get('from', '')}]: {str(t.get('body', t.get('message', '')))[:120]}\n"
 
     send_as = "merchant_on_behalf" if customer else "vera"
 
@@ -308,11 +340,12 @@ CUSTOMER (message is sent on behalf of merchant TO this customer):
 
 
 def compose_message(category: dict, merchant: dict, trigger: dict,
-                     customer: Optional[dict] = None,
-                     conv_history: list = None) -> dict:
+                    customer: Optional[dict] = None,
+                    conv_history: list = None) -> dict:
     """Core composer — returns {body, cta, rationale, send_as, suppression_key}."""
 
-    prompt = build_compose_prompt(category, merchant, trigger, customer, conv_history)
+    prompt = build_compose_prompt(
+        category, merchant, trigger, customer, conv_history)
 
     raw = call_llm(prompt)
 
@@ -333,10 +366,12 @@ def compose_message(category: dict, merchant: dict, trigger: dict,
 
     body = result.get("body", "").strip()
     cta = result.get("cta", "open_ended")
-    rationale = result.get("rationale", "Composed from trigger + merchant context")
+    rationale = result.get(
+        "rationale", "Composed from trigger + merchant context")
 
     # Validate CTA
-    valid_ctas = {"binary_yes_no", "open_ended", "binary_confirm_cancel", "none", "multi_choice_slot"}
+    valid_ctas = {"binary_yes_no", "open_ended",
+                  "binary_confirm_cancel", "none", "multi_choice_slot"}
     if cta not in valid_ctas:
         cta = "open_ended"
 
@@ -344,7 +379,8 @@ def compose_message(category: dict, merchant: dict, trigger: dict,
     body = re.sub(r'https?://\S+', '[link]', body)
 
     send_as = "merchant_on_behalf" if customer else "vera"
-    suppression_key = trigger.get("suppression_key", f"msg:{merchant.get('merchant_id')}:{trigger.get('id')}")
+    suppression_key = trigger.get(
+        "suppression_key", f"msg:{merchant.get('merchant_id')}:{trigger.get('id')}")
 
     return {
         "body": body,
@@ -379,7 +415,7 @@ Rules:
 
 
 def compose_reply(conv_id: str, merchant_id: str, customer_id: Optional[str],
-                   from_role: str, message: str, turn_number: int) -> dict:
+                  from_role: str, message: str, turn_number: int) -> dict:
     """Compose a reply to a merchant/customer message."""
 
     conv = conversations.get(conv_id, {})
@@ -412,7 +448,8 @@ def compose_reply(conv_id: str, merchant_id: str, customer_id: Optional[str],
         return {"action": "end", "rationale": "Merchant opted out explicitly. Closing."}
     if intent == "out_of_scope":
         merchant = get_merchant(merchant_id)
-        m_name = merchant.get("identity", {}).get("owner_first_name", "") if merchant else ""
+        m_name = merchant.get("identity", {}).get(
+            "owner_first_name", "") if merchant else ""
         return {
             "action": "send",
             "body": f"That's outside what I can help with directly — best to check with your CA or the relevant portal. Coming back to what we were discussing{' ' + m_name if m_name else ''} — want me to proceed?",
@@ -437,7 +474,8 @@ def compose_reply(conv_id: str, merchant_id: str, customer_id: Optional[str],
 
     merchant_name = (merchant or {}).get("identity", {}).get("name", "")
     owner = (merchant or {}).get("identity", {}).get("owner_first_name", "")
-    active_offers = [o["title"] for o in (merchant or {}).get("offers", []) if o.get("status") == "active"]
+    active_offers = [o["title"] for o in (merchant or {}).get(
+        "offers", []) if o.get("status") == "active"]
     cust_agg = (merchant or {}).get("customer_aggregate", {})
 
     prompt = f"""{REPLY_SYSTEM}
@@ -446,7 +484,7 @@ MERCHANT: {merchant_name} | owner={owner}
 CATEGORY: {category_slug}
 ACTIVE_OFFERS: {active_offers}
 CUSTOMER_AGG: total={cust_agg.get('total_unique_ytd')} lapsed={cust_agg.get('lapsed_180d_plus') or cust_agg.get('lapsed_90d_plus')}
-TRIGGER_KIND: {(trigger or {}).get('kind','')}
+TRIGGER_KIND: {(trigger or {}).get('kind', '')}
 
 CONVERSATION SO FAR:
 {history_block}
@@ -550,7 +588,8 @@ def select_and_compose_actions(available_triggers: list[str], now: str) -> list[
 
         # Build template params (first 3 meaningful parts of the body)
         body_parts = result["body"].split(". ")[:3]
-        template_params = body_parts[:3] if len(body_parts) >= 3 else body_parts + ["..."] * (3 - len(body_parts))
+        template_params = body_parts[:3] if len(
+            body_parts) >= 3 else body_parts + ["..."] * (3 - len(body_parts))
 
         # Determine template name
         kind = trg.get("kind", "generic")
@@ -643,6 +682,7 @@ class CtxBody(BaseModel):
     payload: dict[str, Any]
     delivered_at: str = ""
 
+
 @app.post("/v1/context")
 async def push_context(body: CtxBody):
     if body.scope not in {"category", "merchant", "customer", "trigger"}:
@@ -663,6 +703,7 @@ class TickBody(BaseModel):
     now: str
     available_triggers: list[str] = []
 
+
 @app.post("/v1/tick")
 async def tick(body: TickBody):
     if not body.available_triggers:
@@ -679,6 +720,7 @@ class ReplyBody(BaseModel):
     message: str
     received_at: str = ""
     turn_number: int = 1
+
 
 @app.post("/v1/reply")
 async def reply(body: ReplyBody):
