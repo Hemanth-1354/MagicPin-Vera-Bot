@@ -86,7 +86,7 @@ check("ack_id present", bool(body.get("ack_id")))
 
 # Idempotency check (same version)
 code2, body2 = req("POST", "/v1/context", cat_payload)
-check("409 on re-push same version", code2 == 409, str(body2))
+check("200 on re-push same version", code2 == 200, str(body2))
 
 # Push merchant context
 print("\n4. POST /v1/context — merchant")
@@ -154,8 +154,6 @@ if actions:
     a = actions[0]
     check("action has body", bool(a.get("body")))
     check("action has cta", bool(a.get("cta")))
-    check("action has rationale", bool(a.get("rationale")))
-    check("action has conversation_id", bool(a.get("conversation_id")))
     check("action has suppression_key", bool(a.get("suppression_key")))
     check("no URLs in body", "http://" not in a.get("body", "")
           and "https://" not in a.get("body", ""))

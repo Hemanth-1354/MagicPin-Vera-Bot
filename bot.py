@@ -1382,14 +1382,43 @@ def select_and_compose_actions(available_triggers: list[str], now: str) -> list[
         merchant_id = trg.get("merchant_id")
         customer_id = trg.get("customer_id")
 
-        if not merchant_id:
+        if not merchant_id and not tid.startswith("trg_research_digest_"):
             continue
+        
+        # If it's a category trigger, we will loop over merchants later
+        # (This is a simplified fix to bypass the initial check)
         if merchant_id in acted_merchants:
             continue
 
         expires_at = trg.get("expires_at", "")
         if expires_at and expires_at < now:
             continue
+
+        if not merchant_id and tid.startswith("trg_research_digest_"):
+            # Category trigger logic
+            category_slug = tid.replace("trg_research_digest_", "")
+            category = get_category(category_slug)
+            if not category: continue
+            for (m_scope, m_id_str), m_data in contexts.items():
+                if m_scope != "merchant": continue
+                m_p = m_data.get("payload", {})
+                m_id = m_p.get("merchant_id") or m_id_str
+                m_cat = m_p.get("category_slug") or m_p.get("identity", {}).get("category_slug")
+                if m_cat == category_slug:
+                    try:
+                        res = compose_message(category, m_p, trg, None)
+                        if res.get("body"):
+                            conv_id = f"conv_{m_id}_{tid}_{hashlib.md5(now.encode()).hexdigest()[:6]}"
+                            actions.append({
+                                "merchant_id":     m_id,
+                                "trigger_id":      tid,
+                                "body":            res["body"],
+                                "cta":             res["cta"],
+                                "suppression_key": f"research:{category_slug}:{now[:10]}",
+                            })
+                            conversations[conv_id] = {"merchant_id": m_id, "trigger_id": tid, "turn": 1}
+                    except: continue
+            continue # Handled
 
         merchant = get_merchant(merchant_id)
         if not merchant:
@@ -1421,17 +1450,11 @@ def select_and_compose_actions(available_triggers: list[str], now: str) -> list[
         template_name = TEMPLATE_MAP.get(kind, "vera_generic_v2")
 
         action = {
-            "conversation_id": conv_id,
             "merchant_id":     merchant_id,
-            "customer_id":     customer_id,
-            "send_as":         result["send_as"],
             "trigger_id":      tid,
-            "template_name":   template_name,
-            "template_params": template_params,
             "body":            result["body"],
             "cta":             result["cta"],
             "suppression_key": suppression_key,
-            "rationale":       result["rationale"],
         }
         actions.append(action)
 
@@ -1483,28 +1506,13 @@ async def healthz():
 
 @app.get("/v1/metadata")
 async def metadata():
-    model_primary   = GROQ_MODEL_COMPOSE if GROQ_API_KEY else (GOOGLE_MODEL if GOOGLE_API_KEYS else "claude-haiku-4-5-20251001")
-    model_reply     = GROQ_MODEL_REPLY   if GROQ_API_KEY else model_primary
+    model_primary = GROQ_MODEL_COMPOSE if GROQ_API_KEY else (GOOGLE_MODEL if GOOGLE_API_KEYS else "claude-opus-4-7")
     return {
         "team_name":    TEAM_NAME,
         "team_members": TEAM_MEMBERS.split(","),
         "model":        model_primary,
-        "model_routing": {
-            "/v1/tick  (compose)": "SambaNova 70b → OpenRouter 70b → Groq 70b → heuristic",
-            "/v1/reply (turns)":   "SambaNova 8b → OpenRouter 8b → Groq 8b → heuristic",
-        },
-        "approach": (
-            "Advanced Signal-Grounded Composition: Deterministic extraction of merchant performance "
-            "signals (retention, CTR spikes, peer benchmarks) coupled with high-fidelity LLM synthesis. "
-            "Architecture features a 6-provider resilient fallback chain (Groq, SambaNova, OpenRouter, etc.) "
-            "with sub-7s latency capping and per-key rotation (4 keys) for 100% availability. "
-            "Multi-turn turn-aware state machine with global auto-reply fingerprinting, "
-            "intent-transition logic, and loss-aversion based conversion hooks. "
-            "Strictly grounded in pushed context — zero hallucination design."
-        ),
-        "contact_email": CONTACT_EMAIL,
-        "version":       BOT_VERSION,
-        "submitted_at":  datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "approach":     "single-prompt composer with retrieval",
+        "version":      BOT_VERSION,
     }
 
 
@@ -1534,24 +1542,20 @@ async def push_context(body: CtxBody):
                 content={"accepted": False, "reason": "stale_version", "current_version": cur["version"]}
             )
         if cur["version"] == body.version:
-            # Same version re-push — idempotent no-op (per spec: already_stored)
-            # Returning accepted: True to satisfy judge_simulator PASS check
-            return JSONResponse(
-                status_code=409,
-                content={
-                    "accepted":       True,
-                    "reason":         "already_stored",
-                    "current_version": cur["version"],
-                    "ack_id":         f"ack_{body.context_id}_v{body.version}",
-                }
-            )
+            # Same version re-push — idempotent no-op (200 OK)
+            return {
+                "accepted":       True,
+                "ack_id":         f"ack_{body.context_id}_v{body.version}",
+                "stored_at":      cur.get("stored_at", now_iso()),
+            }
 
     # New or higher version — store
-    contexts[key] = {"version": body.version, "payload": body.payload}
+    stored_at = now_iso()
+    contexts[key] = {"version": body.version, "payload": body.payload, "stored_at": stored_at}
     return {
         "accepted":  True,
         "ack_id":    f"ack_{body.context_id}_v{body.version}",
-        "stored_at": now_iso(),
+        "stored_at": stored_at,
     }
 
 
@@ -1614,13 +1618,11 @@ async def reply(body: ReplyBody):
         return {
             "action":   "send",
             "body":     result["body"],
-            "cta":      result.get("cta", "open_ended"),
             "rationale": result.get("rationale", ""),
         }
     elif result["action"] == "wait":
         return {
             "action":       "wait",
-            "wait_seconds": result.get("wait_seconds", 86400),
             "rationale":    result.get("rationale", ""),
         }
     else:
