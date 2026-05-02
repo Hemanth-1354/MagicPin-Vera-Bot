@@ -12,8 +12,9 @@ import time
 import json
 import re
 import hashlib
+import asyncio
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Optional, List
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -106,6 +107,12 @@ def get_category(slug: str)         -> Optional[dict]: return get_ctx("category"
 def get_customer(customer_id: str)  -> Optional[dict]: return get_ctx("customer",  customer_id)
 def get_trigger(trigger_id: str)    -> Optional[dict]: return get_ctx("trigger",   trigger_id)
 
+def is_repeat_auto_reply(conv_id: str, message: str) -> int:
+    conv = conversations.get(conv_id, {})
+    turns = conv.get("turns", [])
+    msg_low = message.strip().lower()
+    return sum(1 for t in turns if t.get("from") == "merchant" and t.get("message", "").strip().lower() == msg_low)
+
 
 def detect_auto_reply(message: str) -> bool:
     patterns = [
@@ -156,16 +163,6 @@ def detect_explicit_intent(message: str) -> Optional[str]:
     ]):
         return "hostile"
     return None
-
-
-def is_repeat_auto_reply(conv_id: str, message: str) -> int:
-    conv  = conversations.get(conv_id, {})
-    turns = conv.get("turns", [])
-    return sum(
-        1 for t in turns
-        if t.get("from") == "merchant"
-        and t.get("message", "").strip().lower() == message.strip().lower()
-    )
 
 
 # ─────────────────────────────────────────────
@@ -510,31 +507,6 @@ _openrouter_disabled  = False
 _or_model_429_at: dict[str, float] = {}
 OPENROUTER_COOLDOWN_S = 20
 
-# ── SambaNova ─────────────────────────────────
-# Free account: https://cloud.sambanova.ai → API Keys
-# Rate limit: ~30 req/min free tier
-SAMBANOVA_API_KEY       = os.getenv("SAMBANOVA_API_KEY", "").strip()
-SAMBANOVA_MODEL_COMPOSE = "Meta-Llama-3.3-70B-Instruct"
-SAMBANOVA_MODEL_REPLY   = "Meta-Llama-3.1-8B-Instruct"
-SAMBANOVA_BASE_URL      = "https://api.sambanova.ai/v1/chat/completions"
-_sambanova_disabled     = False
-_sambanova_429_at       = 0.0
-SAMBANOVA_COOLDOWN_S    = 30
-
-# ── Gemini ────────────────────────────────────
-# Use gemini-1.5-flash-latest as primary due to high stability
-GOOGLE_MODEL     = "gemini-1.5-flash"
-GOOGLE_MODEL_ALT = "gemini-1.5-flash-latest"
-GOOGLE_API_KEYS: list[str] = []
-for _k in ["GOOGLE_API_KEY", "GOOGLE_API_KEY_2", "GOOGLE_API_KEY_3", "GOOGLE_API_KEY_4"]:
-    _v = os.getenv(_k, "").strip()
-    if _v:
-        GOOGLE_API_KEYS.append(_v)
-GEMINI_COOLDOWN_S    = 60
-_gemini_key_index    = 0
-_gemini_call_counts  = [0] * max(len(GOOGLE_API_KEYS), 1)
-_gemini_key_429_at: dict[int, float] = {}
-
 # ── Groq ──────────────────────────────────────
 GROQ_API_KEYS: list[str] = []
 for _k in ["GROQ_API_KEY_1", "GROQ_API_KEY_2", "GROQ_API_KEY_3", "GROQ_API_KEY_4"]:
@@ -842,12 +814,13 @@ NON-NEGOTIABLE RULES:
    gyms          → coach-energetic (goal-oriented, seasonal awareness)
    pharmacies    → trustworthy-precise (molecule names, batch numbers, no alarm)
 5. Hindi-English code-mix when merchant languages include "hi". Keep it natural.
-6. Use real numbers from context: CTR %, views, calls, peer benchmarks, prices, dates.
+6. Use real numbers from context: CTR %, views, calls, peer benchmarks, prices, dates. EVERY message MUST contain at least one numeric anchor.
 7. Never use: URLs, "guaranteed", "100% safe", "best in city", "miracle", "cure".
 8. Under 120 words. Strong hook in line 1.
 9. The LEAD SIGNAL section tells you WHY this message goes now — build around it.
 10. For customer-facing (send_as=merchant_on_behalf): no medical claims, honor language pref, from merchant's WA number.
 11. Your rationale MUST match what you actually wrote — judge cross-checks them.
+12. NO REFLECTIVE QUESTIONS: Do NOT ask the merchant what they think is working or to analyze their own success. YOU are the expert; provide the analysis and suggest an action.
 
 OUTPUT: JSON only, no markdown, no explanation:
 {
@@ -1011,6 +984,8 @@ RULES:
    - "opt-out/hostile": action=end.
 3. ANTI-REPEAT: Do NOT repeat previous bot messages.
 4. NO URLs. Hook in line 1. Under 100 words.
+5. NO REFLECTIVE QUESTIONS: Provide analysis, don't ask for it.
+6. SPECIFICITY: Every response MUST contain a numeric anchor (date, price, or metric).
 
 OUTPUT JSON:
 {
@@ -1041,9 +1016,9 @@ def compose_reply(
 
     # ── Auto-reply detection ─────────────────────────────────────────────────
     if detect_auto_reply(message):
-        msg_key = message.strip().lower()
+        msg_key = f"{conv_id}:{message.strip().lower()}"
         if msg_key in seen_auto_reply_msgs:
-            return {"action": "end", "rationale": "Same auto-reply seen before — closing."}
+            return {"action": "end", "rationale": "Same auto-reply seen before in this conversation — closing."}
         repeat_count = is_repeat_auto_reply(conv_id, message)
         if repeat_count >= 2:
             seen_auto_reply_msgs.add(msg_key)
@@ -1078,7 +1053,7 @@ def compose_reply(
         name_part  = f"Got it {owner}! " if owner else "Got it! "
         return {
             "action": "send",
-            "body":   f"{name_part}Proceeding now.{offer_hint}{scope_hint} Confirm to send the draft.",
+            "body":   f"{name_part}Proceeding now.{offer_hint}{scope_hint} Can you confirm to send the draft?",
             "cta":    "binary_confirm_cancel",
             "rationale": "Merchant committed — switching to execution mode with concrete scope."
         }
@@ -1191,7 +1166,7 @@ TEMPLATE_MAP = {
 }
 
 
-def select_and_compose_actions(available_triggers: list[str], now: str) -> list[dict]:
+async def select_and_compose_actions(available_triggers: list[str], now: str) -> list[dict]:
     actions         = []
     acted_merchants = set()
 
@@ -1200,37 +1175,38 @@ def select_and_compose_actions(available_triggers: list[str], now: str) -> list[
         trg = get_trigger(tid)
         if trg:
             trigger_objs.append((tid, trg))
+    
     # Sort by urgency DESC
     trigger_objs.sort(key=lambda x: -x[1].get("urgency", 1))
 
-    for tid, trg in trigger_objs:
-        if len(actions) >= 20:
-            break
+    # To prevent timeout, we process in a semi-batch but capped at 20 total actions
+    tasks = []
+    
+    # Semaphore limits concurrency to 4 — prevents Groq burst 429s
+    # and serialises acted_merchants check to prevent duplicate sends
+    _sem = asyncio.Semaphore(4)
+
+    async def process_trigger(tid, trg):
+        nonlocal actions
+        if len(actions) >= 20: return
 
         suppression_key = trg.get("suppression_key", f"msg:{trg.get('merchant_id','?')}:{tid}")
-        if suppression_key in fired_suppressions:
-            continue
+        if suppression_key in fired_suppressions: return
 
         merchant_id = trg.get("merchant_id")
         customer_id = trg.get("customer_id")
 
-        if not merchant_id and not tid.startswith("trg_research_digest_"):
-            continue
-        
-        # If it's a category trigger, we will loop over merchants later
-        # (This is a simplified fix to bypass the initial check)
-        if merchant_id in acted_merchants:
-            continue
+        if not merchant_id and not tid.startswith("trg_research_digest_"): return
+        if merchant_id in acted_merchants: return
 
         expires_at = trg.get("expires_at", "")
-        if expires_at and expires_at < now:
-            continue
+        if expires_at and expires_at < now: return
 
+        # Category trigger logic (simplified sync loop for category to avoid explosion)
         if not merchant_id and tid.startswith("trg_research_digest_"):
-            # Category trigger logic
             category_slug = tid.replace("trg_research_digest_", "")
             category = get_category(category_slug)
-            if not category: continue
+            if not category: return
             for (m_scope, m_id_str), m_data in contexts.items():
                 if m_scope != "merchant": continue
                 m_p = m_data.get("payload", {})
@@ -1254,66 +1230,64 @@ def select_and_compose_actions(available_triggers: list[str], now: str) -> list[
                                 "suppression_key": f"research:{category_slug}:{now[:10]}",
                             })
                             conversations[conv_id] = {"merchant_id": m_id, "trigger_id": tid, "turn": 1}
-                    except: continue
-            continue # Handled
+                    except Exception as e:
+                        print(f'[Category trigger error] {e}')
+                        continue
+            return
 
         merchant = get_merchant(merchant_id)
-        if not merchant:
-            continue
+        if not merchant: return
 
         category_slug = merchant.get("category_slug", "")
         category      = get_category(category_slug)
-        if not category:
-            continue
+        if not category: return
 
         customer = get_customer(customer_id) if customer_id else None
 
         try:
-            result = compose_message(category, merchant, trg, customer, merchant.get("conversation_history", []))
+            # Note: compose_message is still sync, but running it in parallel tasks helps
+            result = await asyncio.to_thread(compose_message, category, merchant, trg, customer, merchant.get("conversation_history", []))
+            if not result.get("body"): return
+
+            conv_id = f"conv_{merchant_id}_{tid}_{hashlib.md5(now.encode()).hexdigest()[:6]}"
+            body_parts = result["body"].split(". ")[:3]
+            template_params = (body_parts + ["..."] * 3)[:3]
+            kind          = trg.get("kind", "generic")
+            template_name = TEMPLATE_MAP.get(kind, "vera_generic_v2")
+
+            action = {
+                "conversation_id": conv_id,
+                "merchant_id":     merchant_id,
+                "trigger_id":      tid,
+                "send_as":         result.get("send_as", "vera"),
+                "template_name":   template_name,
+                "template_params": template_params,
+                "body":            result["body"],
+                "cta":             result["cta"],
+                "rationale":       result.get("rationale", "Composed from merchant trigger"),
+                "suppression_key": suppression_key,
+            }
+            actions.append(action)
+            fired_suppressions.add(suppression_key)
+            acted_merchants.add(merchant_id)
+            conversations[conv_id] = {
+                "turns":       [],
+                "merchant_id": merchant_id,
+                "customer_id": customer_id,
+                "trigger_id":  tid,
+                "ended":       False,
+            }
         except Exception as e:
             print(f"[Compose error] {tid}: {e}")
-            continue
 
-        if not result.get("body"):
-            continue
-
-        conv_id = f"conv_{merchant_id}_{tid}_{hashlib.md5(now.encode()).hexdigest()[:6]}"
-
-        # template_params: 3 parts of the body
-        body_parts     = result["body"].split(". ")[:3]
-        template_params = (body_parts + ["..."] * 3)[:3]
-
-        kind          = trg.get("kind", "generic")
-        template_name = TEMPLATE_MAP.get(kind, "vera_generic_v2")
-
-        action = {
-            "conversation_id": conv_id,
-            "merchant_id":     merchant_id,
-            "trigger_id":      tid,
-            "send_as":         result.get("send_as", "vera"),
-            "template_name":   template_name,
-            "template_params": template_params,
-            "body":            result["body"],
-            "cta":             result["cta"],
-            "rationale":       result.get("rationale", "Composed from merchant trigger"),
-            "suppression_key": suppression_key,
-        }
-        actions.append(action)
-
-        fired_suppressions.add(suppression_key)
-        acted_merchants.add(merchant_id)
-        conversations[conv_id] = {
-            "turns":       [],
-            "merchant_id": merchant_id,
-            "customer_id": customer_id,
-            "trigger_id":  tid,
-            "ended":       False,
-        }
-
-        # Small sleep between compositions to avoid RPM bursts
-        # SambaNova is ~500ms/call so 0.2s gap is plenty; Gemini cooldown handles the rest
-        if len(actions) < 20:
-            time.sleep(0.2)
+    # Process first 20 triggers in parallel
+    # Semaphore(4) caps concurrency — prevents burst 429s on Groq
+    # and serialises acted_merchants check (race condition fix)
+    sem = asyncio.Semaphore(4)
+    async def _guarded(tid, trg):
+        async with sem:
+            await process_trigger(tid, trg)
+    await asyncio.gather(*(_guarded(tid, trg) for tid, trg in trigger_objs[:20]))
 
     print(f"[TICK] Returning {len(actions)} actions")
     return actions
@@ -1411,7 +1385,7 @@ class TickBody(BaseModel):
 async def tick(body: TickBody):
     if not body.available_triggers:
         return {"actions": []}
-    actions = select_and_compose_actions(body.available_triggers, body.now)
+    actions = await select_and_compose_actions(body.available_triggers, body.now)
     return {"actions": actions}
 
 
@@ -1461,11 +1435,13 @@ async def reply(body: ReplyBody):
         return {
             "action":   "send",
             "body":     result["body"],
+            "cta":      result.get("cta", "open_ended"),
             "rationale": result.get("rationale", ""),
         }
     elif result["action"] == "wait":
         return {
             "action":       "wait",
+            "wait_seconds": result.get("wait_seconds", 86400),
             "rationale":    result.get("rationale", ""),
         }
     else:

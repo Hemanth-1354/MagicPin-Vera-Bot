@@ -115,9 +115,9 @@ def main():
                 "rationale": result.get("rationale", "")
             }
             results.append(output)
-            print(f"✓ ({len(result.get('body',''))} chars)")
+            print(f"[OK] ({len(result.get('body',''))} chars)")
         except Exception as e:
-            print(f"✗ ERROR: {e}")
+            print(f"[ERROR] {e}")
 
         time.sleep(6)  # Rate limit buffer (increased to avoid 429s)
 
@@ -126,7 +126,7 @@ def main():
         for r in results:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
-    print(f"\n✓ Written {len(results)}/{len(test_pairs)} results to {args.out}")
+    print(f"\n[DONE] Written {len(results)}/{len(test_pairs)} results to {args.out}")
 
 if __name__ == "__main__":
     main()
