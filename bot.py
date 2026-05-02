@@ -1490,8 +1490,8 @@ async def metadata():
         "team_members": TEAM_MEMBERS.split(","),
         "model":        model_primary,
         "model_routing": {
-            "/v1/tick  (compose)": f"Groq {GROQ_MODEL_COMPOSE} → Groq {GROQ_MODEL_REPLY} → Gemini → Anthropic → heuristic",
-            "/v1/reply (turns)":   f"Groq {GROQ_MODEL_REPLY} → Groq {GROQ_MODEL_COMPOSE} → Gemini → Anthropic → heuristic",
+            "/v1/tick  (compose)": "SambaNova 70b → OpenRouter 70b → Groq 70b → heuristic",
+            "/v1/reply (turns)":   "SambaNova 8b → OpenRouter 8b → Groq 8b → heuristic",
         },
         "approach": (
             "Advanced Signal-Grounded Composition: Deterministic extraction of merchant performance "
