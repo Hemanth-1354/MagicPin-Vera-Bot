@@ -119,7 +119,7 @@ def main():
         except Exception as e:
             print(f"✗ ERROR: {e}")
 
-        time.sleep(0.3)  # Rate limit buffer
+        time.sleep(4)  # Rate limit buffer
 
     # Write output
     with open(args.out, "w") as f:

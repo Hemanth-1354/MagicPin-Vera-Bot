@@ -19,19 +19,20 @@ Author: magicpin AI Challenge Team
 # =============================================================================
 # ██████  CONFIGURATION - EDIT THIS SECTION ██████
 # =============================================================================
-
+from dotenv import load_dotenv
+load_dotenv()
 import os
 # Your bot's URL (where your bot is running)
 BOT_URL = os.getenv("BOT_URL")
 
 # Choose your LLM provider: "openai", "anthropic", "gemini", "deepseek", "groq", "ollama", "openrouter"
-LLM_PROVIDER = os.getenv("LLM_PROVIDER")
+LLM_PROVIDER = 'gemini'
 
 # Your API key (paste your key here)
-LLM_API_KEY = os.getenv("GEMINI_API_KEY")  # <-- PUT YOUR API KEY HERE
+LLM_API_KEY = os.getenv("GOOGLE_API_KEY")  # <-- PUT YOUR API KEY HERE
 
 # Model to use (leave empty for default, or specify like "gpt-4o", "claude-3-5-sonnet-20241022", etc.)
-LLM_MODEL = os.getenv("GEMINI_MODEL")  # <-- Optional: specify model or leave empty for default
+LLM_MODEL = 'gemini-flash-latest'  # <-- Optional: specify model or leave empty for default
 
 # For Ollama only: local server URL
 OLLAMA_URL = "http://localhost:11434"

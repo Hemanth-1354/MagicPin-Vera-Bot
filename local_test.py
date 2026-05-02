@@ -25,7 +25,8 @@ results = []
 def req(method, path, body=None):
     url = BOT_URL + path
     data = json.dumps(body).encode() if body else None
-    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    headers = {"Content-Type": "application/json",
+               "Accept": "application/json"}
     r = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(r, timeout=30) as resp:
@@ -156,13 +157,15 @@ if actions:
     check("action has rationale", bool(a.get("rationale")))
     check("action has conversation_id", bool(a.get("conversation_id")))
     check("action has suppression_key", bool(a.get("suppression_key")))
-    check("no URLs in body", "http://" not in a.get("body", "") and "https://" not in a.get("body", ""))
+    check("no URLs in body", "http://" not in a.get("body", "")
+          and "https://" not in a.get("body", ""))
     print(f"\n  📩 Sample message:\n  {a.get('body', '')[:200]}")
 
     # Tick again — should NOT re-send same suppression_key (idempotency)
     code2, body2 = req("POST", "/v1/tick", tick_payload)
     actions2 = body2.get("actions", [])
-    check("suppression works (no dup action)", len(actions2) == 0, f"got {len(actions2)} actions")
+    check("suppression works (no dup action)", len(
+        actions2) == 0, f"got {len(actions2)} actions")
 
     # 7. Reply
     if actions:
@@ -181,7 +184,8 @@ if actions:
         code, body = req("POST", "/v1/reply", reply_payload)
         elapsed = time.time() - t0
         check("reply status=200", code == 200)
-        check("reply has action", body.get("action") in {"send", "wait", "end"})
+        check("reply has action", body.get(
+            "action") in {"send", "wait", "end"})
         check("reply within 30s", elapsed < 30, f"{elapsed:.1f}s")
         if body.get("action") == "send":
             check("reply body not empty", bool(body.get("body")))
@@ -193,11 +197,13 @@ if actions:
                       "message": "Thank you for contacting Dr. Meera's Dental Clinic! Our team will respond shortly.",
                       "turn_number": 3}
         code, body = req("POST", "/v1/reply", ar_payload)
-        check("auto-reply handled", body.get("action") in {"send", "wait", "end"}, body.get("action"))
+        check("auto-reply handled", body.get("action")
+              in {"send", "wait", "end"}, body.get("action"))
 
         # Opt-out test
         print("\n9. POST /v1/reply (opt-out)")
-        opt_payload = {**reply_payload, "message": "Not interested. Stop messaging me.", "turn_number": 4}
+        opt_payload = {
+            **reply_payload, "message": "Not interested. Stop messaging me.", "turn_number": 4}
         code, body = req("POST", "/v1/reply", opt_payload)
         check("opt-out → end", body.get("action") == "end", body.get("action"))
 
