@@ -579,12 +579,10 @@ def _post_json(url: str, body: dict, headers: dict, timeout: int = 7) -> dict:
             output_tokens = len(res_data) // 4
             tracker.log_request(input_tokens + output_tokens)
             rpm, tpm = tracker.get_stats()
-            print(f"[TRAFFIC] Current Load: {rpm} RPM | {tpm} TPM (est)")
             return json.loads(res_data)
     except urllib.error.HTTPError as e:
         tracker.log_request(input_tokens)
         rpm, tpm = tracker.get_stats()
-        print(f"[TRAFFIC] Current Load: {rpm} RPM | {tpm} TPM (est) [FAIL]")
         raise RuntimeError(f"HTTP {e.code}: {e.read().decode('utf-8', errors='replace')[:200]}")
 
 
@@ -720,7 +718,6 @@ def call_gemini(prompt: str) -> str:
                     res_data = r.read()
                     tracker.log_request((len(body) + len(res_data)) // 4)
                     rpm, tpm = tracker.get_stats()
-                    print(f"[TRAFFIC] Current Load: {rpm} RPM | {tpm} TPM (est)")
                     data = json.loads(res_data)
                 result = data["candidates"][0]["content"]["parts"][0]["text"].strip()
                 print(f"[LLM OK] Gemini/{model} key[{key_idx}]")
