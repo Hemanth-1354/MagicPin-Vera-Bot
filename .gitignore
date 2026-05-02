@@ -1,3 +1,5 @@
 .env
 __pycache__/
 *.pyc
+final_smoke_test.py
+test.rest
