@@ -9,6 +9,12 @@ services:
         value: 3.10.0
       - key: GOOGLE_API_KEY
         sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: TOGETHER_API_KEY
+        sync: false
+      - key: CEREBRAS_API_KEY
+        sync: false
       - key: SAMBANOVA_API_KEY
         sync: false
       - key: OPENROUTER_API_KEY

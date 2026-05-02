@@ -919,8 +919,17 @@ _HEURISTIC_FALLBACK = json.dumps({
 def call_llm_compose(prompt: str) -> str:
     """
     /v1/tick — quality matters most.
-    SambaNova 70b -> OpenRouter 70b -> Gemini -> heuristic
+    Groq 70b -> Together 70b -> Cerebras 70b -> SambaNova 70b -> OpenRouter 70b -> heuristic
     """
+    if GROQ_API_KEY and not _groq_disabled:
+        try: return call_groq(prompt, GROQ_MODEL_COMPOSE)
+        except Exception as e: print(f"[Groq 70b] {e}")
+    if TOGETHER_API_KEY and not _together_disabled:
+        try: return call_together(prompt, TOGETHER_MODEL_COMPOSE)
+        except Exception as e: print(f"[Together 70b] {e}")
+    if CEREBRAS_API_KEY and not _cerebras_disabled:
+        try: return call_cerebras(prompt, CEREBRAS_MODEL_COMPOSE)
+        except Exception as e: print(f"[Cerebras 70b] {e}")
     if SAMBANOVA_API_KEY and not _sambanova_disabled:
         try: return call_sambanova(prompt, SAMBANOVA_MODEL_COMPOSE)
         except Exception as e: print(f"[SambaNova 70b] {e}")
@@ -933,8 +942,17 @@ def call_llm_compose(prompt: str) -> str:
 def call_llm_reply(prompt: str) -> str:
     """
     /v1/reply — speed matters most.
-    SambaNova 8b -> OpenRouter 8b -> Gemini -> heuristic
+    Groq 8b -> Together 8b -> Cerebras 8b -> SambaNova 8b -> OpenRouter 8b -> heuristic
     """
+    if GROQ_API_KEY and not _groq_disabled:
+        try: return call_groq(prompt, GROQ_MODEL_REPLY)
+        except Exception as e: print(f"[Groq 8b] {e}")
+    if TOGETHER_API_KEY and not _together_disabled:
+        try: return call_together(prompt, TOGETHER_MODEL_REPLY)
+        except Exception as e: print(f"[Together 8b] {e}")
+    if CEREBRAS_API_KEY and not _cerebras_disabled:
+        try: return call_cerebras(prompt, CEREBRAS_MODEL_REPLY)
+        except Exception as e: print(f"[Cerebras 8b] {e}")
     if SAMBANOVA_API_KEY and not _sambanova_disabled:
         try: return call_sambanova(prompt, SAMBANOVA_MODEL_REPLY)
         except Exception as e: print(f"[SambaNova 8b] {e}")
@@ -1607,14 +1625,13 @@ async def teardown():
     fired_suppressions.clear()
     seen_auto_reply_msgs.clear()
     global _gemini_key_index, _gemini_call_counts, _gemini_key_429_at,\
-           _openrouter_disabled, _openrouter_429_at,\
+           _openrouter_disabled, _or_model_429_at,\
            _sambanova_disabled, _sambanova_429_at, _anthropic_disabled
     _gemini_key_index    = 0
     _gemini_call_counts  = [0] * max(len(GOOGLE_API_KEYS), 1)
     _gemini_key_429_at   = {}
     _openrouter_disabled = False
     _or_model_429_at.clear()
-    _openrouter_429_at   = 0.0
     _sambanova_disabled  = False
     _sambanova_429_at    = 0.0
     _anthropic_disabled  = False
