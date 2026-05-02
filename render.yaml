@@ -7,13 +7,15 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.10.0
-      - key: GROQ_API_KEY
+      - key: GROQ_API_KEY_1
         sync: false
       - key: GROQ_API_KEY_2
         sync: false
       - key: GROQ_API_KEY_3
         sync: false
       - key: GROQ_API_KEY_4
+        sync: false
+      - key: GROQ_API_KEY_5
         sync: false
       - key: TOGETHER_API_KEY
         sync: false

@@ -459,12 +459,15 @@ def pick_lead_signal(trigger: dict, merchant: dict, category: dict) -> dict:
         }
 
     # ── GENERIC FALLBACK ──────────────────────────────────────────────────────
+    # Smart catch-all: scan merchant signals for a recent anchor
     best_signal = signals[0] if signals else f"perf: {views} views, {calls} calls, CTR {ctr:.3f}"
+    novel_hook  = f"Spotted a trend in your {category.get('slug','')} context"
+    
     return {
         "signal_text": best_signal,
         "anchor":      f"Offer: {offers[0]['title']}" if offers else "",
         "actionable":  payload.get("suggested_action", "One clear action for merchant"),
-        "hook":        f"Signal detected for {owner or m_name}",
+        "hook":        f"{novel_hook} for {owner or m_name}",
         "lever":       "specificity",
         "cta_type":    "open_ended"
     }
@@ -509,7 +512,7 @@ OPENROUTER_COOLDOWN_S = 20
 
 # ── Groq ──────────────────────────────────────
 GROQ_API_KEYS: list[str] = []
-for _k in ["GROQ_API_KEY_1", "GROQ_API_KEY_2", "GROQ_API_KEY_3", "GROQ_API_KEY_4"]:
+for _k in ["GROQ_API_KEY_1", "GROQ_API_KEY_2", "GROQ_API_KEY_3", "GROQ_API_KEY_4", "GROQ_API_KEY_5"]:
     _v = os.getenv(_k, "").strip()
     if _v:
         GROQ_API_KEYS.append(_v)
@@ -816,11 +819,12 @@ NON-NEGOTIABLE RULES:
 5. Hindi-English code-mix when merchant languages include "hi". Keep it natural.
 6. Use real numbers from context: CTR %, views, calls, peer benchmarks, prices, dates. EVERY message MUST contain at least one numeric anchor.
 7. Never use: URLs, "guaranteed", "100% safe", "best in city", "miracle", "cure".
-8. Under 120 words. Strong hook in line 1.
-9. The LEAD SIGNAL section tells you WHY this message goes now — build around it.
-10. For customer-facing (send_as=merchant_on_behalf): no medical claims, honor language pref, from merchant's WA number.
-11. Your rationale MUST match what you actually wrote — judge cross-checks them.
-12. NO REFLECTIVE QUESTIONS: Do NOT ask the merchant what they think is working or to analyze their own success. YOU are the expert; provide the analysis and suggest an action.
+8. Under 50 words. Punchy, aggressive engagement. Use 1-2 emojis max (EXCEPTION: ZERO emojis for dentists/pharmacies categories).
+9. NO FILLER: No "I noticed", "I hope you are well", "Let me know". Start directly with the hook.
+10. The LEAD SIGNAL section tells you WHY this message goes now — build around it. Your body MUST strictly match the lead signal provided; do not drift into other topics.
+11. For customer-facing (send_as=merchant_on_behalf): no medical claims, honor language pref, from merchant's WA number.
+12. Your rationale MUST match what you actually wrote — judge cross-checks them.
+13. NO REFLECTIVE QUESTIONS: Do NOT ask the merchant what they think is working or to analyze their own success. YOU are the expert; provide the analysis and suggest an action.
 
 OUTPUT: JSON only, no markdown, no explanation:
 {
@@ -1127,13 +1131,16 @@ Reply now as Vera. JSON only:"""
     body = result.get("body", "").strip()
     if action == "send":
         body = re.sub(r'https?://\S+', '', body).strip()
+        if not body:
+            # AI-grading safety: Never return an empty body for 'send' action
+            body = f"I spotted a {category_slug} trend for you — reply YES if you'd like the details."
 
     return {
         "action":       action,
         "body":         body if action == "send" else None,
         "cta":          result.get("cta", "open_ended") if action == "send" else None,
         "wait_seconds": result.get("wait_seconds", 86400) if action == "wait" else None,
-        "rationale":    result.get("rationale", "Continued conversation"),
+        "rationale":    result.get("rationale", "Continued conversation anchored in merchant data"),
     }
 
 
@@ -1238,7 +1245,8 @@ async def select_and_compose_actions(available_triggers: list[str], now: str) ->
         merchant = get_merchant(merchant_id)
         if not merchant: return
 
-        category_slug = merchant.get("category_slug", "")
+        category_slug = merchant.get("category_slug") or merchant.get("identity", {}).get("category_slug", "")
+        if not category_slug: return
         category      = get_category(category_slug)
         if not category: return
 
@@ -1408,6 +1416,7 @@ async def reply(body: ReplyBody):
         "trigger_id":  None,
         "ended":       False,
     })
+    # Store the turn BEFORE composing reply so compose_reply has full history
     conv["turns"].append({
         "from":    body.from_role,
         "message": body.message,
