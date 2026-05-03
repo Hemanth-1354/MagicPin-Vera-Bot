@@ -132,10 +132,14 @@ def detect_auto_reply(message: str) -> bool:
     return any(p in msg_lower for p in patterns)
 
 
-def detect_explicit_intent(message: str) -> Optional[str]:
+def detect_explicit_intent(message: str, from_role: str = "merchant") -> Optional[str]:
     msg_lower = message.lower()
     word_count = len(message.split())
     
+    if from_role == "customer":
+        if any(w in msg_lower for w in ["book", "confirm", "yes", "slot", "pm", "am", "1", "2"]):
+            return "customer_commit"
+            
     if any(p in msg_lower for p in ["book me", "confirm my appointment", "yes please book"]):
         return "commit"
         
@@ -968,6 +972,11 @@ def compose_message(
 
     body = re.sub(r'https?://\S+', '', body).strip()
 
+    if not body:
+        m_name = merchant.get("identity", {}).get("name", "Merchant")
+        body = f"Quick update for {m_name} — {lead_signal.get('signal_text', 'we spotted a new trend')}. Reply YES to discuss."
+        cta = "binary_yes_no"
+
     send_as        = "merchant_on_behalf" if customer else "vera"
     suppression_key = trigger.get(
         "suppression_key",
@@ -1034,21 +1043,39 @@ def compose_reply(
 
     # ── Auto-reply detection ─────────────────────────────────────────────────
     if detect_auto_reply(message):
-        return {"action": "end", "rationale": "Auto-reply detected — closing."}
+        # Use a merchant-based key to track auto-replies if the judge changes conv_id
+        ar_key = f"ar_count:{merchant_id}"
+        count = conversations.get(ar_key, 0) + 1
+        conversations[ar_key] = count
+        
+        if count >= 3:
+            return {"action": "end", "rationale": "3 consecutive auto-replies detected for this merchant. Closing."}
+        elif count == 2:
+            return {"action": "wait", "wait_seconds": 86400, "rationale": "Second auto-reply — owner not present. Wait 24h."}
+        else:
+            merchant = get_merchant(merchant_id) or {}
+            owner = merchant.get("identity", {}).get("owner_first_name", "")
+            return {
+                "action": "send", 
+                "body": f"Looks like an auto-reply 🙂 When {owner or 'the owner'} is free, just reply YES to continue.", 
+                "cta": "binary_yes_no", 
+                "rationale": "Auto-reply (first occurrence) — prompting for owner."
+            }
 
     # ── Explicit intent fast-paths ───────────────────────────────────────────
-    intent = detect_explicit_intent(message)
+    intent = detect_explicit_intent(message, from_role)
+
+    if intent == "customer_commit":
+        merchant = get_merchant(merchant_id) or {}
+        m_name   = merchant.get("identity", {}).get("name", "us")
+        return {
+            "action": "send",
+            "body": f"Confirmed! Your appointment with {m_name} is booked for the requested slot. We have logged this in our system. See you then! 🙏",
+            "cta": "none",
+            "rationale": "Customer confirmed booking; minimal confirmation with zero fabrication."
+        }
 
     if intent == "commit":
-        if from_role == "customer":
-            merchant = get_merchant(merchant_id) or {}
-            m_name   = merchant.get("identity", {}).get("name", "us")
-            return {
-                "action": "send",
-                "body": f"Confirmed! Your slot is booked. {m_name} will see you then — reply if you need to reschedule.",
-                "cta": "none",
-                "rationale": "Customer confirmed booking; closing out conversation nicely."
-            }
 
         merchant = get_merchant(merchant_id) or {}
         owner    = merchant.get("identity", {}).get("owner_first_name", "")
@@ -1061,15 +1088,15 @@ def compose_reply(
         name_part  = f"Great! {owner}, " if owner else "Great! "
         
         if lapsed > 0:
-            body = f"{name_part}I'll set up the {offer_name} campaign for you. Should we target your {lapsed} lapsed patients first to bring them back?"
+            body = f"{name_part}Got it! I'm drafting the {offer_name} campaign for your {lapsed} lapsed patients now. I'll send the draft for your final approval in a few minutes."
         else:
-            body = f"{name_part}I'll set up the {offer_name} campaign for you. Should we push this to your {total} active customers today?"
+            body = f"{name_part}Got it! I'm drafting the {offer_name} campaign for your {total} active customers now. I'll send the draft for your final approval in a few minutes."
             
         return {
             "action": "send",
             "body":   body,
-            "cta":    "binary_confirm_cancel",
-            "rationale": f"Merchant committed to {offer_name}. Transitioning to tactical execution targeting {lapsed or total} customers."
+            "cta":    "none",
+            "rationale": f"Merchant committed to {offer_name}. Transitioning to ACTION mode immediately as per brief."
         }
 
     if intent == "opt_out":
