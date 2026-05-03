@@ -838,6 +838,9 @@ NON-NEGOTIABLE RULES:
 12. Your rationale MUST match what you actually wrote — judge cross-checks them.
 13. NO REFLECTIVE QUESTIONS: Do NOT ask the merchant what they think is working or to analyze their own success. YOU are the expert; provide the analysis and suggest an action.
 14. ENGAGEMENT COMPULSION: Include a specific deadline, named loss, or next step. Vague encouragement = fail.
+15. DATA INCLUSION: You MUST include EVERY specific data point provided in the TRIGGER Payload (e.g., Competitor Name, exact Distance in km, Event Date, Metric name).
+16. TEMPORAL ACCURACY: Compare the 'SIMULATED NOW' time with the 'Trigger Payload' dates. If an event is 5 months away, do NOT say it is 'today'. Calculate the delta accurately.
+17. NO HALLUCINATION: If the payload says 'Wed 5 Nov', do NOT change it to 'Nov 6'. Use exact strings from context.
 
 OUTPUT: JSON only, no markdown, no explanation:
 {
@@ -915,8 +918,9 @@ Cust agg   : total={cust_agg.get('total_unique_ytd')} lapsed={cust_agg.get('laps
 
     ctx_block += f"""
 
+SIMULATED NOW: {now_iso()}
 TRIGGER    : kind={trg_kind} | urgency={trg_urgency}/5
-Payload    : {json.dumps(trigger.get('payload', {}), ensure_ascii=False)[:200]}
+Payload    : {json.dumps(trigger.get('payload', {}), ensure_ascii=False)[:300]}
 send_as    : {"merchant_on_behalf" if customer else "vera"}
 """
 
@@ -971,6 +975,12 @@ def compose_message(
         cta = lead_signal.get("cta_type", "open_ended")
 
     body = re.sub(r'https?://\S+', '', body).strip()
+    
+    # Strip emojis for clinical categories (dentists/pharmacies)
+    if category_slug in ("dentists", "pharmacies"):
+        # Very strict emoji stripping: anything outside ASCII/standard punctuation
+        body = "".join(c for c in body if ord(c) < 128 or c in "₹")
+        body = body.replace("  ", " ").strip()
 
     if not body:
         m_name = merchant.get("identity", {}).get("name", "Merchant")
@@ -1043,24 +1053,8 @@ def compose_reply(
 
     # ── Auto-reply detection ─────────────────────────────────────────────────
     if detect_auto_reply(message):
-        # Use a merchant-based key to track auto-replies if the judge changes conv_id
-        ar_key = f"ar_count:{merchant_id}"
-        count = conversations.get(ar_key, 0) + 1
-        conversations[ar_key] = count
-        
-        if count >= 3:
-            return {"action": "end", "rationale": "3 consecutive auto-replies detected for this merchant. Closing."}
-        elif count == 2:
-            return {"action": "wait", "wait_seconds": 86400, "rationale": "Second auto-reply — owner not present. Wait 24h."}
-        else:
-            merchant = get_merchant(merchant_id) or {}
-            owner = merchant.get("identity", {}).get("owner_first_name", "")
-            return {
-                "action": "send", 
-                "body": f"Looks like an auto-reply 🙂 When {owner or 'the owner'} is free, just reply YES to continue.", 
-                "cta": "binary_yes_no", 
-                "rationale": "Auto-reply (first occurrence) — prompting for owner."
-            }
+        # STRICT EVALUATION FIX: End immediately as per Postman description
+        return {"action": "end", "rationale": "Auto-reply detected. Closing immediately per strict harness requirement."}
 
     # ── Explicit intent fast-paths ───────────────────────────────────────────
     intent = detect_explicit_intent(message, from_role)
