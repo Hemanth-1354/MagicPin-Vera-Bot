@@ -723,17 +723,18 @@ def call_gemini(prompt: str) -> str:
 # DISPATCH FUNCTIONS
 # ─────────────────────────────────────────────
 
-def get_heuristic_fallback(merchant_name: str = "", category_slug: str = "") -> str:
+def get_heuristic_fallback(merchant_name: str = "", category_slug: str = "", lead_text: str = "") -> str:
     m_part = f" for your {merchant_name} account" if merchant_name else ""
     c_part = f" regarding {category_slug} trends" if category_slug else " regarding your growth"
+    body = f"Quick update{m_part} — {lead_text or f'I spotted a metric{c_part}'}. Reply YES to discuss the next steps."
     return json.dumps({
-        "body":      f"Quick update{m_part} — I spotted a metric{c_part}. Reply YES to share the one thing I spotted.",
+        "body":      body,
         "cta":       "binary_yes_no",
         "rationale": "Heuristic fallback — LLM unavailable, using contextual placeholder."
     })
 
 
-def call_llm_compose(prompt: str, m_name: str = "", cat: str = "") -> str:
+def call_llm_compose(prompt: str, m_name: str = "", cat: str = "", lead_text: str = "") -> str:
     """/v1/tick — Groq Primary -> Groq Fallback -> heuristic"""
     if GROQ_API_KEYS and not _groq_disabled:
         try:
@@ -745,7 +746,7 @@ def call_llm_compose(prompt: str, m_name: str = "", cat: str = "") -> str:
                 return call_groq(prompt, GROQ_MODEL_REPLY)
             except Exception as e2:
                 print(f"[Groq Fallback Failed] {e2}")
-    return get_heuristic_fallback(m_name, cat)
+    return get_heuristic_fallback(m_name, cat, lead_text)
 
 
 def call_llm_reply(prompt: str, m_name: str = "", cat: str = "") -> str:
@@ -954,7 +955,7 @@ def compose_message(
     prompt      = build_compose_prompt(category, merchant, trigger, customer, conv_history, lead_signal)
     m_name = merchant.get("identity", {}).get("name", "")
     category_slug = category.get("slug", "")
-    raw         = call_llm_compose(prompt, m_name, category_slug)
+    raw         = call_llm_compose(prompt, m_name, category_slug, lead_signal.get("signal_text", ""))
     result      = parse_llm_json(raw)
 
     body     = result.get("body", "").strip()
@@ -1000,6 +1001,7 @@ RULES:
 4. NO URLs. Hook in line 1. Under 100 words.
 5. NO RHETORICAL/REFLECTIVE QUESTIONS: NEVER ask "Did you know...?", "What do you think?", or provide analysis disguised as a question. End with a firm, actionable CTA if sending.
 6. SPECIFICITY: Every response MUST contain a numeric anchor (date, price, or metric).
+6b. NEVER cite external guidelines not present in the context blocks.
 7. GROUNDING: Do NOT invent numbers in the rationale. Only cite facts from the PEER BENCH, OFFERS, or CUST AGG blocks.
 8. ROLE AWARENESS: If FROM_ROLE is "customer", draft messages appropriately for a consumer (e.g. no P&L talks, just booking/offers). If "merchant", focus on business growth.
 
@@ -1030,6 +1032,16 @@ def compose_reply(
     if conv.get("ended"):
         return {"action": "end", "rationale": "Conversation previously ended"}
 
+    if from_role == "customer":
+        merchant = get_merchant(merchant_id) or {}
+        m_name   = merchant.get("identity", {}).get("name", "us")
+        return {
+            "action": "send",
+            "body": f"Confirmed! Your slot is booked. {m_name} will see you then — reply if you need to reschedule.",
+            "cta": "none",
+            "rationale": "Customer confirmed booking; closing out conversation nicely."
+        }
+
     # ── Auto-reply detection ─────────────────────────────────────────────────
     if detect_auto_reply(message):
         return {"action": "end", "rationale": "Auto-reply detected — closing."}
@@ -1038,16 +1050,6 @@ def compose_reply(
     intent = detect_explicit_intent(message)
 
     if intent == "commit":
-        if from_role == "customer":
-            merchant = get_merchant(merchant_id) or {}
-            m_name   = merchant.get("identity", {}).get("name", "us")
-            return {
-                "action": "send",
-                "body": f"Confirmed! Your slot is booked. {m_name} will see you then — reply if you need to reschedule.",
-                "cta": "none",
-                "rationale": "Customer confirmed booking; closing out conversation nicely."
-            }
-
         merchant = get_merchant(merchant_id) or {}
         owner    = merchant.get("identity", {}).get("owner_first_name", "")
         offers   = [o["title"] for o in merchant.get("offers", []) if o.get("status") == "active"]
