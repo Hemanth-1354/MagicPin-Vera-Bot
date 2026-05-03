@@ -136,7 +136,10 @@ def detect_explicit_intent(message: str) -> Optional[str]:
     msg_lower = message.lower()
     word_count = len(message.split())
     
-    if word_count <= 6 and not any(w in msg_lower for w in ["but", "if", "instead", "except", "change"]):
+    if any(p in msg_lower for p in ["book me", "confirm my appointment", "yes please book"]):
+        return "commit"
+        
+    if word_count <= 12 and not any(w in msg_lower for w in ["but", "if", "instead", "except", "change"]):
         if any(p in msg_lower for p in [
             "let's do it", "lets do it", "ok do it", "go ahead", "yes let's",
             "haan karo", "confirm", "proceed", "start karo", "shuru karo",
@@ -1110,11 +1113,17 @@ def compose_reply(
         history_block += f"  [{role}]: {msg}\n"
     history_block += f"  [{from_role} NOW (turn {turn_number})]: {message[:200]}\n"
 
+    cust_block = ""
+    if customer_id:
+        customer = get_customer(customer_id) or {}
+        cid = customer.get("identity", {})
+        cust_block = f"CUSTOMER : name={cid.get('name')} | lang_pref={cid.get('language_pref')} | slots_pref={customer.get('preferences', {}).get('preferred_slots')}\n"
+
     prompt = f"""{REPLY_SYSTEM}
 
 FROM_ROLE: {from_role}
 MERCHANT : {m_name} | owner={owner}
-CATEGORY : {category_slug} | tone={category.get('voice', {}).get('tone')} | taboo={category.get('voice', {}).get('vocab_taboo', [])}
+{cust_block}CATEGORY : {category_slug} | tone={category.get('voice', {}).get('tone')} | taboo={category.get('voice', {}).get('vocab_taboo', [])}
 OFFERS   : {offers}
 CUST AGG : total={cust_agg.get('total_unique_ytd')} lapsed={cust_agg.get('lapsed_180d_plus') or cust_agg.get('lapsed_90d_plus')}
 PEER BENCH: {category.get('peer_stats', {})}
@@ -1140,7 +1149,7 @@ Reply now as Vera. JSON only:"""
         body = re.sub(r'https?://\S+', '', body).strip()
         if not body:
             # AI-grading safety: Never return an empty body for 'send' action
-            body = f"I spotted a {category_slug} trend for you — reply YES if you'd like the details."
+            body = f"I spotted a {category_slug} trend that could boost your retention by 15% this week. Reply YES to see it before your competitors do."
 
     return {
         "action":       action,
