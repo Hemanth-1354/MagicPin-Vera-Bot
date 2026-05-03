@@ -1032,16 +1032,6 @@ def compose_reply(
     if conv.get("ended"):
         return {"action": "end", "rationale": "Conversation previously ended"}
 
-    if from_role == "customer":
-        merchant = get_merchant(merchant_id) or {}
-        m_name   = merchant.get("identity", {}).get("name", "us")
-        return {
-            "action": "send",
-            "body": f"Confirmed! Your slot is booked. {m_name} will see you then — reply if you need to reschedule.",
-            "cta": "none",
-            "rationale": "Customer confirmed booking; closing out conversation nicely."
-        }
-
     # ── Auto-reply detection ─────────────────────────────────────────────────
     if detect_auto_reply(message):
         return {"action": "end", "rationale": "Auto-reply detected — closing."}
@@ -1050,6 +1040,16 @@ def compose_reply(
     intent = detect_explicit_intent(message)
 
     if intent == "commit":
+        if from_role == "customer":
+            merchant = get_merchant(merchant_id) or {}
+            m_name   = merchant.get("identity", {}).get("name", "us")
+            return {
+                "action": "send",
+                "body": f"Confirmed! Your slot is booked. {m_name} will see you then — reply if you need to reschedule.",
+                "cta": "none",
+                "rationale": "Customer confirmed booking; closing out conversation nicely."
+            }
+
         merchant = get_merchant(merchant_id) or {}
         owner    = merchant.get("identity", {}).get("owner_first_name", "")
         offers   = [o["title"] for o in merchant.get("offers", []) if o.get("status") == "active"]
