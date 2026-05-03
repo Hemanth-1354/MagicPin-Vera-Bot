@@ -821,6 +821,7 @@ NON-NEGOTIABLE RULES:
    pharmacies    → trustworthy-precise (molecule names, batch numbers, no alarm)
 5. Hindi-English code-mix when merchant languages include "hi". Keep it natural.
 6. Use real numbers from context: CTR %, views, calls, peer benchmarks, prices, dates. EVERY message MUST contain at least one numeric anchor.
+6b. NEVER invent industry statistics. Only use numbers present in the context blocks above.
 7. Never use: URLs, "guaranteed", "100% safe", "best in city", "miracle", "cure".
 8. Under 50 words. Punchy, aggressive engagement. Use 1-2 emojis max (EXCEPTION: ZERO emojis for dentists/pharmacies categories).
 9. NO FILLER: No "I noticed", "I hope you are well", "Let me know". Start directly with the hook.
@@ -828,6 +829,7 @@ NON-NEGOTIABLE RULES:
 11. For customer-facing (send_as=merchant_on_behalf): no medical claims, honor language pref, from merchant's WA number.
 12. Your rationale MUST match what you actually wrote — judge cross-checks them.
 13. NO REFLECTIVE QUESTIONS: Do NOT ask the merchant what they think is working or to analyze their own success. YOU are the expert; provide the analysis and suggest an action.
+14. ENGAGEMENT COMPULSION: Include a specific deadline, named loss, or next step. Vague encouragement = fail.
 
 OUTPUT: JSON only, no markdown, no explanation:
 {
@@ -993,10 +995,10 @@ RULES:
    - "opt-out/hostile": action=end.
 3. ANTI-REPEAT: Do NOT repeat previous bot messages.
 4. NO URLs. Hook in line 1. Under 100 words.
-5. NO REFLECTIVE QUESTIONS: Provide analysis, don't ask for it.
+5. NO RHETORICAL/REFLECTIVE QUESTIONS: NEVER ask "Did you know...?", "What do you think?", or provide analysis disguised as a question. End with a firm, actionable CTA if sending.
 6. SPECIFICITY: Every response MUST contain a numeric anchor (date, price, or metric).
 7. GROUNDING: Do NOT invent numbers in the rationale. Only cite facts from the PEER BENCH, OFFERS, or CUST AGG blocks.
-8. NO RE-PITCHING: If the merchant has already accepted an offer, do NOT explain the offer again. Move to next steps (e.g., target segments, scheduling).
+8. ROLE AWARENESS: If FROM_ROLE is "customer", draft messages appropriately for a consumer (e.g. no P&L talks, just booking/offers). If "merchant", focus on business growth.
 
 OUTPUT JSON:
 {
@@ -1027,32 +1029,22 @@ def compose_reply(
 
     # ── Auto-reply detection ─────────────────────────────────────────────────
     if detect_auto_reply(message):
-        msg_key = f"{conv_id}:{message.strip().lower()}"
-        if msg_key in seen_auto_reply_msgs:
-            return {"action": "end", "rationale": "Same auto-reply seen before in this conversation — closing."}
-        repeat_count = is_repeat_auto_reply(conv_id, message)
-        if repeat_count >= 2:
-            seen_auto_reply_msgs.add(msg_key)
-            return {"action": "end", "rationale": "Auto-reply 3+ times — closing."}
-        seen_auto_reply_msgs.add(msg_key)
-        # First time: send a prompt for the owner (per api-call-examples.md §4.1)
-        if turn_number <= 2:
-            merchant = get_merchant(merchant_id) or {}
-            owner = merchant.get("identity", {}).get("owner_first_name", "")
-            body = f"Looks like an auto-reply :) When {owner or 'the owner'} is free, just reply YES to continue."
-            return {
-                "action": "send",
-                "body":   body,
-                "cta":    "binary_yes_no",
-                "rationale": "Auto-reply detected (first time) — prompt for owner."
-            }
-        return {"action": "wait", "wait_seconds": 86400,
-                "rationale": "Auto-reply repeated — owner not present. Wait 24h."}
+        return {"action": "end", "rationale": "Auto-reply detected — closing."}
 
     # ── Explicit intent fast-paths ───────────────────────────────────────────
     intent = detect_explicit_intent(message)
 
     if intent == "commit":
+        if from_role == "customer":
+            merchant = get_merchant(merchant_id) or {}
+            m_name   = merchant.get("identity", {}).get("name", "us")
+            return {
+                "action": "send",
+                "body": f"Confirmed! Your slot is booked. {m_name} will see you then — reply if you need to reschedule.",
+                "cta": "none",
+                "rationale": "Customer confirmed booking; closing out conversation nicely."
+            }
+
         merchant = get_merchant(merchant_id) or {}
         owner    = merchant.get("identity", {}).get("owner_first_name", "")
         offers   = [o["title"] for o in merchant.get("offers", []) if o.get("status") == "active"]
@@ -1116,10 +1108,11 @@ def compose_reply(
         role = t.get("from", "")
         msg  = t.get("body", t.get("message", ""))[:150]
         history_block += f"  [{role}]: {msg}\n"
-    history_block += f"  [merchant NOW (turn {turn_number})]: {message[:200]}\n"
+    history_block += f"  [{from_role} NOW (turn {turn_number})]: {message[:200]}\n"
 
     prompt = f"""{REPLY_SYSTEM}
 
+FROM_ROLE: {from_role}
 MERCHANT : {m_name} | owner={owner}
 CATEGORY : {category_slug} | tone={category.get('voice', {}).get('tone')} | taboo={category.get('voice', {}).get('vocab_taboo', [])}
 OFFERS   : {offers}
@@ -1184,6 +1177,7 @@ TEMPLATE_MAP = {
     "trial_followup":           "merchant_trial_followup_v2",
     "dormant_with_vera":        "vera_dormant_v2",
     "category_trend_movement":  "vera_trend_v2",
+    "competitor_opened":        "vera_competitor_alert_v2",
 }
 
 
@@ -1217,15 +1211,18 @@ async def select_and_compose_actions(available_triggers: list[str], now: str) ->
         merchant_id = trg.get("merchant_id")
         customer_id = trg.get("customer_id")
 
-        if not merchant_id and not tid.startswith("trg_research_digest_"): return
-        if merchant_id in acted_merchants: return
+        if not merchant_id:
+            pass
+        elif merchant_id in acted_merchants: 
+            return
 
         expires_at = trg.get("expires_at", "")
         if expires_at and expires_at < now: return
 
         # Category trigger logic (simplified sync loop for category to avoid explosion)
-        if not merchant_id and tid.startswith("trg_research_digest_"):
-            category_slug = tid.replace("trg_research_digest_", "")
+        if not merchant_id:
+            category_slug = trg.get("payload", {}).get("category", "")
+            if not category_slug: return
             category = get_category(category_slug)
             if not category: return
             for (m_scope, m_id_str), m_data in contexts.items():
