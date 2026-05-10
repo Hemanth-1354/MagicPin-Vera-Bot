@@ -1,4 +1,4 @@
-# Vera: magicpin AI Merchant Growth Engine — submission v4.4.0
+# Vera: magicpin AI Merchant Growth Engine
 
 Vera is a deterministic, signal-driven AI assistant engineered to drive merchant growth through high-specificity outreach. Unlike standard conversational agents, Vera implements a **Signal-First Architecture** that prioritizes business metrics over generic chat, ensuring every message is grounded, actionable, and compliant with category-specific voices.
 
@@ -116,8 +116,3 @@ This script will iterate through the base dataset and produce a `submission.json
 - **Success Rate**: 99.8% (Simulated stress tests with 10% LLM failure injection).
 
 ---
-
-**Team Name:** Vera Dheera Soora  
-**Lead AI:** Antigravity  
-**Version:** 4.4.0 (Hardened Production Release)  
-**Challenge:** magicpin AI Challenge 2026
